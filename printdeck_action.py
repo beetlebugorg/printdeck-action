@@ -47,6 +47,33 @@ def log(msg):
     print(msg, flush=True)
 
 
+class group:
+    """A section of the log of the run, which GitHub folds."""
+
+    def __init__(self, title):
+        self.title = title
+
+    def __enter__(self):
+        print(f"::group::{self.title}", flush=True)
+
+    def __exit__(self, *exc):
+        print("::endgroup::", flush=True)
+
+
+def clock(sec):
+    sec = int(sec)
+    h, m = sec // 3600, (sec % 3600) // 60
+    return f"{h} h {m} min" if h else f"{m} min {sec % 60} s"
+
+
+def table(header, rows):
+    """A table of Markdown for the summary of the run."""
+    esc = lambda v: str(v).replace("|", "\\|").replace("\n", " ")
+    out = ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
+    out += ["| " + " | ".join(esc(v) for v in r) + " |" for r in rows]
+    return "\n".join(out) + "\n"
+
+
 def fail(msg):
     print(f"::error::{msg}", flush=True)
     raise SystemExit(1)
@@ -241,7 +268,7 @@ def changed_parts(cfg, config_path, base, head):
     prebuilt file, the folder of their profile, or their entry in printdeck.yml. With no base,
     none."""
     if not base:
-        return set()
+        return {}
     diff = set(git("diff", "--name-only", base, head).split())
     old = {}
     try:
@@ -249,13 +276,23 @@ def changed_parts(cfg, config_path, base, head):
         old = {(p.get("name", "").lower(), p.get("variant", "").lower()): p for p in expand(old_cfg.get("parts"))}
     except yaml.YAMLError:
         pass
-    out = set()
+    out = {}
     for p in cfg["entries"]:
         paths = list(p["files"]) + ([p["prebuilt"]] if p.get("prebuilt") else [])
         prof = "profiles/" + str(p.get("profile", "")).partition("/")[0] + "/"
-        if (any(f in diff for f in paths) or (p.get("profile") and any(d.startswith(prof) for d in diff))
-                or old.get((p["name"].lower(), p["variant"].lower())) != p):
-            out.add((p["name"], p["variant"]))
+        was = old.get((p["name"].lower(), p["variant"].lower()))
+        why = []
+        if was is None:
+            why.append("a new part")
+        else:
+            if any(f in diff for f in paths):
+                why.append("its files")
+            if p.get("profile") and any(d.startswith(prof) for d in diff):
+                why.append("its profile")
+            if was != p:
+                why.append("its entry in " + config_path)
+        if why:
+            out[(p["name"], p["variant"])] = why
     return out
 
 
@@ -329,7 +366,8 @@ def bed_and_margin(part):
 def plan(config_path):
     cfg = load_config(config_path)
     files = sorted({f for p in cfg["entries"] for f in p["files"]})
-    generate(cfg, files)
+    with group("Generate the model files"):
+        generate(cfg, files)
     ev = event()
     head = os.environ.get("GITHUB_SHA") or git("rev-parse", "HEAD").strip()
     pr = 0
@@ -337,7 +375,7 @@ def plan(config_path):
         head, pr = ev["pull_request"]["head"]["sha"], ev["pull_request"]["number"]
     base = base_commit(ev)
     changed = changed_parts(cfg, config_path, base, head)
-    log(f"compared with {base or 'nothing'}: {len(changed)} of {len(cfg['entries'])} parts changed")
+    log(f"Compared with {base[:7] if base else 'nothing'}: {len(changed)} of {len(cfg['entries'])} parts changed")
     tmp = tempfile.mkdtemp(prefix="printdeck-plan-")
     manifest = {"commit": head, "pr": pr, "parts": []}
     models = {}
@@ -364,14 +402,28 @@ def plan(config_path):
         entry.update({"size_x": round(sx, 2), "size_y": round(sy, 2), "size_z": round(sz, 2), "bed_x": bx, "bed_y": by,
                       "margin": round(margin, 2)})
         manifest["parts"].append(entry)
-        log(f"  {label(p)}: {sx:.0f} x {sy:.0f} x {sz:.0f} mm{' (changed)' if entry['changed'] else ''}")
+        why = changed.get((p["name"], p["variant"]))
+        log(f"  {label(p)}: {sx:.0f} x {sy:.0f} x {sz:.0f} mm" + (f", changed: {', '.join(why)}" if why else ""))
     reply = call("POST", "/plans", manifest)
-    for name, path in models.items():
-        upload(reply["grant"], name, open(path, "rb").read(), "model/stl")
+    with group(f"Upload {len(models)} models"):
+        for name, path in models.items():
+            upload(reply["grant"], name, open(path, "rb").read(), "model/stl")
+            log(f"  {name}: {os.path.getsize(path) // 1024} KB")
     call("POST", f"/plans/{reply['id']}/done")
     log(f"The plan: {reply['url']}")
-    summary(f"### Printdeck plan\n\n{len(changed)} of {len(cfg['entries'])} parts changed. "
-            f"Choose the parts and the plates: {reply['url']}\n")
+    print(f"::notice title=Printdeck plan::{len(changed)} of {len(cfg['entries'])} parts changed. Choose the parts: {reply['url']}",
+          flush=True)
+    rows = []
+    for e in manifest["parts"]:
+        why = changed.get((e["name"], e["variant"]))
+        rows.append([e["name"], e["variant"] or "-", e.get("printer", ""),
+                     e.get("profile", "").partition("@")[0].rpartition("/")[2] or ("ready file" if e.get("prebuilt") else "-"),
+                     e.get("material_name") or e.get("material") or "-", f"{e['size_x']:.0f} x {e['size_y']:.0f} x {e['size_z']:.0f} mm",
+                     ("yes: " + ", ".join(why)) if why else "no"])
+    against = f"`{base[:7]}`" if base else "nothing (a tag, or the first push)"
+    summary(f"## Printdeck plan\n\n**[Choose the parts and the plates]({reply['url']})**\n\n"
+            f"{len(changed)} of {len(cfg['entries'])} parts changed, compared with {against}.\n\n" +
+            table(["Part", "Variant", "Printer", "Profile", "Material", "Size", "Changed"], rows))
 
 
 def summary(text):
@@ -392,6 +444,7 @@ def slice_build(config_path, build):
         log(f"checking out the commit of the plan, {job['commit'][:7]}")
         subprocess.run(["git", "fetch", "--quiet", "origin", job["commit"]], check=False)
         subprocess.run(["git", "checkout", "--quiet", "--detach", job["commit"]], check=True)
+    log(f"Build {build}: {len(job['plates'])} plates of the commit {job['commit'][:7]}")
     try:
         files = do_slice(config_path, job)
     except SystemExit:
@@ -400,13 +453,27 @@ def slice_build(config_path, build):
     except Exception as e:  # noqa: BLE001: any failure goes to the build page
         call("POST", f"/builds/{build}/failed", {"error": f"The slice run failed: {e}"})
         raise
+    call("POST", f"/builds/{build}/progress", {"text": "Sending the files of the plates"})
     reply = call("POST", f"/builds/{build}/files", {"plates": [f for f, _ in files]})
-    for plate, paths in files:
-        for name, path in paths.items():
-            upload(reply["grant"], name, open(path, "rb").read())
+    with group("Upload the files"):
+        for plate, paths in files:
+            for name, path in paths.items():
+                upload(reply["grant"], name, open(path, "rb").read())
+                log(f"  {name}: {os.path.getsize(path) / 1e6:.1f} MB")
     call("POST", f"/builds/{build}/done")
     log(f"The build: {reply['url']}")
-    summary(f"### Printdeck build\n\n{len(files)} plates sliced. Check and approve them: {reply['url']}\n")
+    print(f"::notice title=Printdeck build::{len(files)} plates sliced. Check and approve them: {reply['url']}", flush=True)
+    rows = []
+    for n, (e, _) in enumerate(files, 1):
+        parts = ", ".join(label(dict(pp, variant=pp.get("variant") or "")) + (f" x{pp['count']}" if pp["count"] > 1 else "")
+                          for pp in e["parts"])
+        rows.append([n, parts, e.get("profile", "").partition("@")[0].rpartition("/")[2] or e.get("slicer", ""),
+                     e.get("material_name") or e.get("material") or "-",
+                     clock(e["seconds"]) if e.get("seconds") else "-", f"{e['grams']} g" if e.get("grams") else "-",
+                     f"{e['layers']} x {e['layer_height']} mm" if e.get("layers") else "-", f"{e['size'] / 1e6:.1f} MB"])
+    summary(f"## Printdeck build\n\n**[Check and approve the plates]({reply['url']})**\n\n"
+            f"{len(files)} plates of the commit `{job['commit'][:7]}`.\n\n" +
+            table(["Plate", "Parts", "Profile", "Material", "Print time", "Filament", "Layers", "File"], rows))
 
 
 def do_slice(config_path, job):
@@ -414,6 +481,7 @@ def do_slice(config_path, job):
     by_name = {(p["name"].lower(), p["variant"].lower()): p for p in cfg["entries"]}
     tmp = tempfile.mkdtemp(prefix="printdeck-slice-")
     out = []
+    total = len(job["plates"])
     for n, plate in enumerate(job["plates"], 1):
         parts = []
         for pp in plate["parts"]:
@@ -422,7 +490,10 @@ def do_slice(config_path, job):
                 raise SystemExit(f"plate {n}: printdeck.yml of this commit has no part {label(dict(pp, variant=pp.get('variant') or ''))}")
             parts.append((p, int(pp["count"])))
         first = parts[0][0]
-        entry = {"printer": plate["printer"], "process": plate["process"], "parts": plate["parts"]}
+        entry = {"printer": plate["printer"], "process": plate["process"], "parts": plate["parts"],
+                 "material_name": plate.get("material_name", ""), "material": plate.get("material", "")}
+        title = " + ".join(label(p) + (f" x{c}" if c > 1 else "") for p, c in parts)
+        call("POST", f"/builds/{job['id']}/progress", {"text": f"Slicing plate {n} of {total}: {title}"})
         paths = {}
         if first.get("prebuilt"):
             src = first["prebuilt"]
@@ -436,17 +507,24 @@ def do_slice(config_path, job):
         else:
             path, quality = profile_of(first)
             name = f"plate-{n}.gcode"
-            title = " + ".join(label(p) + (f" x{c}" if c > 1 else "") for p, c in parts)
             meta = [f";Printdeck title: {title}", f";Printdeck build: {job['id']}", f";Printdeck commit: {job['commit']}"]
-            log(f"plate {n}: {title} ({quality})")
-            facts = curaslice.slice_plate(path, quality, first.get("material"),
-                                          [(label(p), p["files"], c, p.get("settings") or {}) for p, c in parts],
-                                          os.path.join(tmp, name), name=f"{cfg.get('project', 'printdeck')}-{n}", meta=meta)
-            paths[name] = os.path.join(tmp, name)
-            entry.update({"file": name, "seconds": int(facts.get("seconds", 0)), "grams": facts.get("grams", 0),
-                          "layers": int(facts.get("layers", 0)), "layer_height": facts.get("layer_height", 0),
-                          "profile": facts["profile"], "slicer": "CuraEngine 5.13.0"})
-            log(f"  {entry['seconds'] // 60} min, {entry['grams']} g, {entry['layers']} layers")
+            with group(f"Plate {n} of {total}: {title}"):
+                log(f"Printer {first['printer']}, profile {first['profile']}, material {entry['material_name'] or first.get('material')}")
+                for p, c in parts:
+                    log(f"  {label(p)} x{c}: {', '.join(p['files'])}" + (f", settings {p['settings']}" if p.get("settings") else ""))
+                t0 = __import__("time").time()
+                facts = curaslice.slice_plate(path, quality, first.get("material"),
+                                              [(label(p), p["files"], c, p.get("settings") or {}) for p, c in parts],
+                                              os.path.join(tmp, name), name=f"{cfg.get('project', 'printdeck')}-{n}", meta=meta)
+                took = __import__("time").time() - t0
+                for w in curaslice.LAST_WARNINGS:
+                    print(f"::warning title=CuraEngine, plate {n}::{w}", flush=True)
+                paths[name] = os.path.join(tmp, name)
+                entry.update({"file": name, "seconds": int(facts.get("seconds", 0)), "grams": facts.get("grams", 0),
+                              "layers": int(facts.get("layers", 0)), "layer_height": facts.get("layer_height", 0),
+                              "profile": facts["profile"], "slicer": "CuraEngine 5.13.0"})
+                log(f"Sliced in {took:.1f} s: {clock(entry['seconds'])}, {entry['grams']} g, {entry['layers']} layers of "
+                    f"{entry['layer_height']} mm, profile {facts['profile']}")
         data = open(paths[entry["file"]], "rb").read()
         entry["size"] = len(data)
         entry["sha256"] = hashlib.sha256(data).hexdigest()

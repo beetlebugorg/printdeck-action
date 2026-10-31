@@ -25,23 +25,23 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Install the reader of printdeck.yml
+    - name: Install PyYAML, for printdeck.yml
       shell: bash
       run: python3 -m pip install --quiet --disable-pip-version-check "pyyaml>=6,<7"
 
-    - name: Keep CuraEngine between runs
+    - name: Cache CuraEngine 5.13
       if: inputs.mode == 'slice'
       uses: actions/cache@v4
       with:
         path: ~/.cache/printdeck-curaengine-5.13.0
         key: printdeck-curaengine-5.13.0-linux-x64
 
-    - name: Get CuraEngine 5.13.0
+    - name: Get CuraEngine 5.13 (from the Cura AppImage, checked by SHA-256)
       if: inputs.mode == 'slice'
       shell: bash
       run: bash "$GITHUB_ACTION_PATH/curaengine.sh" "$HOME/.cache/printdeck-curaengine-5.13.0"
 
-    - name: Plan or slice
+    - name: ${{ inputs.mode == 'slice' && format('Slice the plates of Printdeck build {0}', inputs.build) || 'Send the plan of the parts to Printdeck' }}
       shell: bash
       env:
         PRINTDECK_MODE: ${{ inputs.mode }}

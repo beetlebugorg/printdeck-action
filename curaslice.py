@@ -637,6 +637,22 @@ def slice_files(meshes, gs, es, out, defs_dir, count=1, lines=()):
     if p.returncode != 0 or not os.path.exists(out):
         raise SystemExit("CuraEngine failed:\n" + (p.stderr or p.stdout)[-3000:])
     write_header(out, p.stdout + p.stderr, lines)
+    global LAST_WARNINGS
+    LAST_WARNINGS = engine_warnings(p.stdout + p.stderr)
+
+
+# LAST_WARNINGS are the warnings of CuraEngine at the last slice, for the log of the Action.
+LAST_WARNINGS = []
+
+
+def engine_warnings(log):
+    """The warnings and the errors of the log of CuraEngine, with no warnings of the
+    definitions: a setting with no default value is a part of the definitions of Cura 5.13."""
+    out = []
+    for line in log.splitlines():
+        if ("[warning]" in line or "[error]" in line) and "has no [default_]value" not in line:
+            out.append(line.split("] ", 2)[-1].strip())
+    return out[:20]
 
 
 HEADER_KEYS = (";FLAVOR:", ";TIME:", ";Filament used:", ";Layer height:", ";MINX:", ";MINY:", ";MINZ:", ";MAXX:", ";MAXY:",

@@ -80,14 +80,15 @@ class Changed(unittest.TestCase):
         os.chdir(d)
         try:
             got = pa.changed_parts(pa.load_config("printdeck.yml"), "printdeck.yml", base, head)
-            self.assertEqual(got, {("A", ""), ("C", ""), ("D", "fine")})
+            self.assertEqual(set(got), {("A", ""), ("C", ""), ("D", "fine")})
+            self.assertEqual((got[("A", "")], got[("C", "")]), (["its files"], ["its entry in printdeck.yml"]))
             fine = next(e for e in pa.load_config("printdeck.yml")["entries"] if e["variant"] == "fine")
             self.assertEqual((fine["files"], fine["settings"]), (["d_fine.stl"], {"adhesion_type": "brim", "brim_line_count": 8}))
             open("profiles/taz/cura.json", "w").write('{"x": 1}')  # the profile: all parts
             run("commit", "-q", "-am", "three")
             got = pa.changed_parts(pa.load_config("printdeck.yml"), "printdeck.yml", head, run("rev-parse", "HEAD"))
-            self.assertEqual(got, {("A", ""), ("B", ""), ("C", ""), ("D", "fine"), ("D", "standard")})
-            self.assertEqual(pa.changed_parts(pa.load_config("printdeck.yml"), "printdeck.yml", None, head), set())
+            self.assertEqual(set(got), {("A", ""), ("B", ""), ("C", ""), ("D", "fine"), ("D", "standard")})
+            self.assertEqual(pa.changed_parts(pa.load_config("printdeck.yml"), "printdeck.yml", None, head), {})
         finally:
             os.chdir(cwd)
 

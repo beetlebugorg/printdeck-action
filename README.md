@@ -23,6 +23,12 @@ from the repository that the project links. The spec is
 
 ```yaml
 name: printdeck
+run-name: >-
+  ${{ github.event_name == 'workflow_dispatch'
+      && format('Printdeck slice · {0}', inputs.title || inputs.build)
+      || github.event_name == 'pull_request'
+      && format('Printdeck plan · PR #{0}: {1}', github.event.pull_request.number, github.event.pull_request.title)
+      || format('Printdeck plan · {0}: {1}', github.ref_name, github.event.head_commit.message) }}
 on:
   push:
     branches: [main]
@@ -33,6 +39,9 @@ on:
       build:
         description: The Printdeck build to slice
         required: true
+      title:
+        description: The plates of the build, for the title of the run
+        required: false
 
 permissions:
   contents: read
@@ -40,6 +49,7 @@ permissions:
 
 jobs:
   plan:
+    name: Plan the printed parts
     if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-24.04
     steps:
@@ -54,6 +64,7 @@ jobs:
           mode: plan
 
   slice:
+    name: Slice the plates
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     steps:
