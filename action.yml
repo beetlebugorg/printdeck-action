@@ -1,0 +1,54 @@
+name: Printdeck plan and slice
+description: Send the plan of the parts of printdeck.yml to Printdeck, or slice the plates of a Printdeck build with CuraEngine.
+author: beetlebugorg
+branding:
+  icon: box
+  color: orange
+
+inputs:
+  mode:
+    description: "plan: send the parts and the models of this commit. slice: slice the plates of the build."
+    required: true
+  build:
+    description: The ID of the Printdeck build to slice (mode slice).
+    required: false
+    default: ""
+  config:
+    description: The parts file of the repository.
+    required: false
+    default: printdeck.yml
+  api:
+    description: The Printdeck service.
+    required: false
+    default: https://printdeck.beetlebug.org
+
+runs:
+  using: composite
+  steps:
+    - name: Install the reader of printdeck.yml
+      shell: bash
+      run: python3 -m pip install --quiet --disable-pip-version-check "pyyaml>=6,<7"
+
+    - name: Keep CuraEngine between runs
+      if: inputs.mode == 'slice'
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/printdeck-curaengine-5.13.0
+        key: printdeck-curaengine-5.13.0-linux-x64
+
+    - name: Get CuraEngine 5.13.0
+      if: inputs.mode == 'slice'
+      shell: bash
+      run: bash "$GITHUB_ACTION_PATH/curaengine.sh" "$HOME/.cache/printdeck-curaengine-5.13.0"
+
+    - name: Plan or slice
+      shell: bash
+      env:
+        PRINTDECK_MODE: ${{ inputs.mode }}
+        PRINTDECK_BUILD: ${{ inputs.build }}
+        PRINTDECK_CONFIG: ${{ inputs.config }}
+        PRINTDECK_API: ${{ inputs.api }}
+      run: |
+        export CURAENGINE="$HOME/.cache/printdeck-curaengine-5.13.0/CuraEngine"
+        export CURAENGINE_LIB="$HOME/.cache/printdeck-curaengine-5.13.0"
+        python3 "$GITHUB_ACTION_PATH/printdeck_action.py" "$PRINTDECK_MODE" --config "$PRINTDECK_CONFIG" --build "$PRINTDECK_BUILD"
