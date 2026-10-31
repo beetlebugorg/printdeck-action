@@ -105,23 +105,57 @@ def upload(grant, name, data, ctype="application/octet-stream"):
 
 # printdeck.yml.
 
+# The fields that a variant of a part can change. settings adds to the settings of the part.
+VARIANT_FIELDS = ("files", "profile", "prebuilt", "material", "count", "alone", "printer", "process", "bed")
+
+
+def expand(parts):
+    """The entries of the parts: one for a part with no variants, and one for each variant of a
+    part with variants. An entry has the fields of its part, with the fields of its variant in
+    their place, and "variant" (the name of the variant, or "")."""
+    out = []
+    for p in parts or []:
+        base = {k: v for k, v in p.items() if k != "variants"}
+        variants = p.get("variants")
+        if not variants:
+            out.append(dict(base, variant=""))
+            continue
+        for v in variants:
+            e = dict(base)
+            for k in VARIANT_FIELDS:
+                if k in v:
+                    e[k] = v[k]
+            e["settings"] = dict(p.get("settings") or {}, **(v.get("settings") or {}))
+            e["variant"] = str(v.get("name") or "")
+            out.append(e)
+    return out
+
+
+def label(e):
+    """The name of an entry with its variant: "Pod door (fine)"."""
+    return f"{e['name']} ({e['variant']})" if e.get("variant") else e["name"]
+
+
 def load_config(path):
     if not os.path.exists(path):
         fail(f"no {path} in the repository")
     with open(path, encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
-    parts = cfg.get("parts") or []
-    if not parts:
+    if not cfg.get("parts"):
         fail(f"{path} has no parts")
+    cfg["entries"] = expand(cfg["parts"])
     names = set()
-    for p in parts:
+    for p in cfg["entries"]:
         if not p.get("name") or not p.get("printer") or not p.get("files"):
-            fail(f"each part of {path} needs a name, a printer and files")
-        if p["name"].lower() in names:
-            fail(f"two parts have the name {p['name']}")
-        names.add(p["name"].lower())
+            fail(f"each part of {path} needs a name, a printer and files (in the part or in each variant)")
+        if p.get("variants") is not None and not p.get("variant"):
+            fail(f"{p['name']}: each variant needs a name")
+        key = (p["name"].lower(), p["variant"].lower())
+        if key in names:
+            fail(f"two parts have the name {label(p)}")
+        names.add(key)
         if not p.get("prebuilt") and not p.get("profile"):
-            fail(f"{p['name']}: a part needs a profile, or a prebuilt file")
+            fail(f"{label(p)}: a part needs a profile, or a prebuilt file")
     return cfg
 
 
@@ -203,24 +237,25 @@ def base_commit(ev):
 
 
 def changed_parts(cfg, config_path, base, head):
-    """The names of the parts that changed between base and head: their files, their prebuilt
-    file, the folder of their profile, or their entry in printdeck.yml. With no base, none."""
+    """The (name, variant) of the entries that changed between base and head: their files, their
+    prebuilt file, the folder of their profile, or their entry in printdeck.yml. With no base,
+    none."""
     if not base:
         return set()
     diff = set(git("diff", "--name-only", base, head).split())
     old = {}
     try:
         old_cfg = yaml.safe_load(git("show", f"{base}:{config_path}")) or {}
-        old = {p.get("name", "").lower(): p for p in old_cfg.get("parts") or []}
+        old = {(p.get("name", "").lower(), p.get("variant", "").lower()): p for p in expand(old_cfg.get("parts"))}
     except yaml.YAMLError:
         pass
     out = set()
-    for p in cfg["parts"]:
+    for p in cfg["entries"]:
         paths = list(p["files"]) + ([p["prebuilt"]] if p.get("prebuilt") else [])
         prof = "profiles/" + str(p.get("profile", "")).partition("/")[0] + "/"
         if (any(f in diff for f in paths) or (p.get("profile") and any(d.startswith(prof) for d in diff))
-                or old.get(p["name"].lower()) != p):
-            out.add(p["name"])
+                or old.get((p["name"].lower(), p["variant"].lower())) != p):
+            out.add((p["name"], p["variant"]))
     return out
 
 
@@ -278,7 +313,7 @@ def bed_and_margin(part):
 
 def plan(config_path):
     cfg = load_config(config_path)
-    files = [f for p in cfg["parts"] for f in p["files"]]
+    files = sorted({f for p in cfg["entries"] for f in p["files"]})
     generate(cfg, files)
     ev = event()
     head = os.environ.get("GITHUB_SHA") or git("rev-parse", "HEAD").strip()
@@ -287,14 +322,14 @@ def plan(config_path):
         head, pr = ev["pull_request"]["head"]["sha"], ev["pull_request"]["number"]
     base = base_commit(ev)
     changed = changed_parts(cfg, config_path, base, head)
-    log(f"compared with {base or 'nothing'}: {len(changed)} of {len(cfg['parts'])} parts changed")
+    log(f"compared with {base or 'nothing'}: {len(changed)} of {len(cfg['entries'])} parts changed")
     tmp = tempfile.mkdtemp(prefix="printdeck-plan-")
     manifest = {"commit": head, "pr": pr, "parts": []}
     models = {}
-    for i, p in enumerate(cfg["parts"]):
-        entry = {"name": p["name"], "files": list(p["files"]), "count": int(p.get("count", 1)), "printer": str(p["printer"]),
+    for i, p in enumerate(cfg["entries"]):
+        entry = {"name": p["name"], "variant": p["variant"], "files": list(p["files"]), "count": int(p.get("count", 1)), "printer": str(p["printer"]),
                  "process": process_of(p), "material": str(p.get("material", "")), "alone": bool(p.get("alone")),
-                 "changed": p["name"] in changed, "models": []}
+                 "changed": (p["name"], p["variant"]) in changed, "models": []}
         if p.get("prebuilt"):
             entry["prebuilt"] = p["prebuilt"]
         else:
@@ -303,7 +338,7 @@ def plan(config_path):
         sx = sy = sz = 0.0
         for j, f in enumerate(p["files"]):
             if not os.path.exists(f):
-                fail(f"{p['name']}: no file {f}")
+                fail(f"{label(p)}: no file {f}")
             name = f"part{i + 1}-{j + 1}.stl"
             x, y, z = model_stl(f, os.path.join(tmp, name))
             sx, sy, sz = max(sx, x), max(sy, y), max(sz, z)
@@ -313,13 +348,13 @@ def plan(config_path):
         entry.update({"size_x": round(sx, 2), "size_y": round(sy, 2), "size_z": round(sz, 2), "bed_x": bx, "bed_y": by,
                       "margin": round(margin, 2)})
         manifest["parts"].append(entry)
-        log(f"  {p['name']}: {sx:.0f} x {sy:.0f} x {sz:.0f} mm{' (changed)' if entry['changed'] else ''}")
+        log(f"  {label(p)}: {sx:.0f} x {sy:.0f} x {sz:.0f} mm{' (changed)' if entry['changed'] else ''}")
     reply = call("POST", "/plans", manifest)
     for name, path in models.items():
         upload(reply["grant"], name, open(path, "rb").read(), "model/stl")
     call("POST", f"/plans/{reply['id']}/done")
     log(f"The plan: {reply['url']}")
-    summary(f"### Printdeck plan\n\n{len(changed)} of {len(cfg['parts'])} parts changed. "
+    summary(f"### Printdeck plan\n\n{len(changed)} of {len(cfg['entries'])} parts changed. "
             f"Choose the parts and the plates: {reply['url']}\n")
 
 
@@ -360,15 +395,15 @@ def slice_build(config_path, build):
 
 def do_slice(config_path, job):
     cfg = load_config(config_path)
-    by_name = {p["name"].lower(): p for p in cfg["parts"]}
+    by_name = {(p["name"].lower(), p["variant"].lower()): p for p in cfg["entries"]}
     tmp = tempfile.mkdtemp(prefix="printdeck-slice-")
     out = []
     for n, plate in enumerate(job["plates"], 1):
         parts = []
         for pp in plate["parts"]:
-            p = by_name.get(pp["name"].lower())
+            p = by_name.get((pp["name"].lower(), str(pp.get("variant") or "").lower()))
             if p is None:
-                raise SystemExit(f"plate {n}: printdeck.yml of this commit has no part {pp['name']}")
+                raise SystemExit(f"plate {n}: printdeck.yml of this commit has no part {label(dict(pp, variant=pp.get('variant') or ''))}")
             parts.append((p, int(pp["count"])))
         first = parts[0][0]
         entry = {"printer": plate["printer"], "process": plate["process"], "parts": plate["parts"]}
@@ -376,7 +411,7 @@ def do_slice(config_path, job):
         if first.get("prebuilt"):
             src = first["prebuilt"]
             if not os.path.exists(src):
-                raise SystemExit(f"{first['name']}: no prebuilt file {src}")
+                raise SystemExit(f"{label(first)}: no prebuilt file {src}")
             name = f"plate-{n}{os.path.splitext(src)[1].lower()}"
             shutil.copyfile(src, os.path.join(tmp, name))
             paths[name] = os.path.join(tmp, name)
@@ -385,11 +420,11 @@ def do_slice(config_path, job):
         else:
             path, quality = profile_of(first)
             name = f"plate-{n}.gcode"
-            title = " + ".join(f"{p['name']}" + (f" x{c}" if c > 1 else "") for p, c in parts)
+            title = " + ".join(label(p) + (f" x{c}" if c > 1 else "") for p, c in parts)
             meta = [f";Printdeck title: {title}", f";Printdeck build: {job['id']}", f";Printdeck commit: {job['commit']}"]
             log(f"plate {n}: {title} ({quality})")
             facts = curaslice.slice_plate(path, quality, first.get("material"),
-                                          [(p["name"], p["files"], c, p.get("settings") or {}) for p, c in parts],
+                                          [(label(p), p["files"], c, p.get("settings") or {}) for p, c in parts],
                                           os.path.join(tmp, name), name=f"{cfg.get('project', 'printdeck')}-{n}", meta=meta)
             paths[name] = os.path.join(tmp, name)
             entry.update({"file": name, "seconds": int(facts.get("seconds", 0)), "grams": facts.get("grams", 0),

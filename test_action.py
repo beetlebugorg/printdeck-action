@@ -55,15 +55,24 @@ class Changed(unittest.TestCase):
         open(os.path.join(d, "profiles", "taz", "cura.json"), "w").write("{}")
         cube(os.path.join(d, "a.stl"), 10)
         cube(os.path.join(d, "b.stl"), 10)
+        cube(os.path.join(d, "d_fine.stl"), 10)
+        cube(os.path.join(d, "d.stl"), 10)
         cfg = ("parts:\n"
                "  - {name: A, files: [a.stl], printer: taz, profile: taz/fine}\n"
                "  - {name: B, files: [b.stl], printer: taz, profile: taz/fine}\n"
-               "  - {name: C, files: [b.stl], printer: taz, profile: taz/fine, count: 2}\n")
+               "  - {name: C, files: [b.stl], printer: taz, profile: taz/fine, count: 2}\n"
+               "  - name: D\n"
+               "    printer: taz\n"
+               "    settings: {adhesion_type: brim}\n"
+               "    variants:\n"
+               "      - {name: fine, files: [d_fine.stl], profile: taz/fine, settings: {brim_line_count: 8}}\n"
+               "      - {name: standard, files: [d.stl], profile: taz/standard}\n")
         open(os.path.join(d, "printdeck.yml"), "w").write(cfg)
         run("add", ".")
         run("commit", "-q", "-m", "one")
         base = run("rev-parse", "HEAD")
         cube(os.path.join(d, "a.stl"), 12)  # A: its file
+        cube(os.path.join(d, "d_fine.stl"), 12)  # D: only its fine variant
         open(os.path.join(d, "printdeck.yml"), "w").write(cfg.replace("count: 2", "count: 4"))  # C: its entry
         run("commit", "-q", "-am", "two")
         head = run("rev-parse", "HEAD")
@@ -71,11 +80,13 @@ class Changed(unittest.TestCase):
         os.chdir(d)
         try:
             got = pa.changed_parts(pa.load_config("printdeck.yml"), "printdeck.yml", base, head)
-            self.assertEqual(got, {"A", "C"})
+            self.assertEqual(got, {("A", ""), ("C", ""), ("D", "fine")})
+            fine = next(e for e in pa.load_config("printdeck.yml")["entries"] if e["variant"] == "fine")
+            self.assertEqual((fine["files"], fine["settings"]), (["d_fine.stl"], {"adhesion_type": "brim", "brim_line_count": 8}))
             open("profiles/taz/cura.json", "w").write('{"x": 1}')  # the profile: all parts
             run("commit", "-q", "-am", "three")
             got = pa.changed_parts(pa.load_config("printdeck.yml"), "printdeck.yml", head, run("rev-parse", "HEAD"))
-            self.assertEqual(got, {"A", "B", "C"})
+            self.assertEqual(got, {("A", ""), ("B", ""), ("C", ""), ("D", "fine"), ("D", "standard")})
             self.assertEqual(pa.changed_parts(pa.load_config("printdeck.yml"), "printdeck.yml", None, head), set())
         finally:
             os.chdir(cwd)

@@ -95,6 +95,25 @@ parts:
     alone: true                 # never shares a plate
 ```
 
+- `variants`: the qualities of a part, for example a fine and a standard print. Each variant has
+  a `name`, and can change `files`, `profile`, `prebuilt`, `material`, `count`, `alone` and
+  `settings` (its settings add to the settings of the part). Each variant is a row of its own on
+  the plan page, with its own mark "Changed", so a change of the fine model marks only the fine
+  variant. The plates, the G-code and the prints name the variant: "Pod door (fine)".
+
+  ```yaml
+  - name: Pod door
+    printer: taz
+    material: roll-4
+    settings: {adhesion_type: brim}
+    variants:
+      - name: fine
+        profile: taz-workhorse-se/pla-0.10-fine
+        files: [bittle_pi_addon/stl/print/pod_door_fine.stl]
+      - name: standard
+        profile: taz-workhorse-se/pla-0.20-standard
+        files: [bittle_pi_addon/stl/print/pod_door.stl]
+  ```
 - `files`: STL or 3MF. A 3MF file keeps the Cura settings of its objects, for example a support
   blocker (`cura:anti_overhang_mesh`).
 - `settings`: Cura settings of the part. A setting that Cura allows for each mesh (for example
