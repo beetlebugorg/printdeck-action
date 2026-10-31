@@ -23,12 +23,13 @@ from the repository that the project links. The spec is
 
 ```yaml
 name: printdeck
+# A push has no title of ours: GitHub then names the run with the first line of the commit.
 run-name: >-
   ${{ github.event_name == 'workflow_dispatch'
       && format('Printdeck slice · {0}', inputs.title || inputs.build)
       || github.event_name == 'pull_request'
       && format('Printdeck plan · PR #{0}: {1}', github.event.pull_request.number, github.event.pull_request.title)
-      || format('Printdeck plan · {0}: {1}', github.ref_name, github.event.head_commit.message) }}
+      || '' }}
 on:
   push:
     branches: [main]
