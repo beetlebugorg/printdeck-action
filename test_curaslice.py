@@ -60,6 +60,28 @@ class Resolve(unittest.TestCase):
         self.assertEqual(es.get("extruder_nr"), 0)
 
 
+class Formulas(unittest.TestCase):
+    def test_all_cura_formulas_pass(self):
+        # Each formula of the definitions and of the profiles passes the check.
+        for name in ("lulzbot_taz_workhorse_se", "lulzbot_taz_workhorse_se_extruder"):
+            defs = c.load_definition(os.path.join(PROFILE, "definitions"), name)
+            for k, p in defs.items():
+                for prop in ("value", "resolve", "limit_to_extruder"):
+                    if isinstance(p.get(prop), str):
+                        c.Formula(p[prop])
+        g, e, _, _ = c.build(PROFILE, "pla-0.10-fine", "roll-4", USER)
+        gs, es = c.engine_settings(g, e, "x", {})
+        self.assertGreater(len(gs), 600)
+
+    def test_code_does_not_run(self):
+        for bad in ("__import__('os').system('true')", "().__class__.__bases__", "open('/etc/passwd').read()",
+                    "(lambda: 1)()", "getattr(math, '__dict__')", "math.__dict__", "[x for x in ().__class__.__mro__]",
+                    "eval('1')", "str.join('', [])"):
+            with self.assertRaises(ValueError, msg=bad):
+                c.Formula(bad)
+        self.assertEqual(eval(c.Formula("max(1, math.ceil(2.5))").code, {"math": __import__("math"), "max": max}), 3)
+
+
 class Layout(unittest.TestCase):
     def test_grid_and_limit(self):
         tmp = tempfile.mkdtemp()

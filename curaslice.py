@@ -37,11 +37,51 @@ import tempfile
 import xml.etree.ElementTree as ET
 
 
+# The parts of Python that the formulas of Cura use. A formula with any other part (an attribute
+# other than math.<name>, a name with "__", a lambda, a call of another function) does not run:
+# a profile of a pull request must not run code in the slice run.
+SAFE_NODES = (ast.Expression, ast.BoolOp, ast.BinOp, ast.UnaryOp, ast.Compare, ast.IfExp, ast.Call, ast.Name, ast.Load,
+              ast.Constant, ast.List, ast.Tuple, ast.Subscript, ast.Slice, ast.Attribute, ast.GeneratorExp, ast.ListComp,
+              ast.comprehension, ast.Store, ast.operator, ast.boolop, ast.cmpop, ast.unaryop, ast.keyword)
+SAFE_CALLS = {"min", "max", "abs", "round", "sum", "len", "int", "float", "str", "bool", "any", "all", "map", "list", "sorted",
+              "extruderValue", "extruderValues", "resolveOrValue", "defaultExtruderPosition", "anyExtruderWithMaterial",
+              "anyExtruderNrWithOrDefault", "valueFromContainer", "extruderValueFromContainer"}
+
+
+def safe_attribute(n):
+    """math.<name>, or index or count of a tuple or list of constants, as in the formula of
+    adhesion_type: ('raft', 'brim', 'skirt', 'none').index."""
+    if isinstance(n.value, ast.Name) and n.value.id == "math" and "__" not in n.attr:
+        return True
+    return (isinstance(n.value, (ast.Tuple, ast.List)) and n.attr in ("index", "count")
+            and all(isinstance(e, ast.Constant) for e in n.value.elts))
+
+
+def check_formula(tree):
+    """Refuses a formula with a part of Python that Cura's formulas do not use."""
+    for n in ast.walk(tree):
+        if not isinstance(n, SAFE_NODES):
+            raise ValueError(f"a formula may not use {type(n).__name__}")
+        if isinstance(n, ast.Name) and "__" in n.id:
+            raise ValueError(f"a formula may not use the name {n.id}")
+        if isinstance(n, ast.Attribute) and not safe_attribute(n):
+            raise ValueError("a formula may use only the attributes of math, and index or count of a list of constants")
+        if isinstance(n, ast.Call):
+            f = n.func
+            ok = (isinstance(f, ast.Name) and f.id in SAFE_CALLS) or (isinstance(f, ast.Attribute) and safe_attribute(f))
+            if not ok:
+                raise ValueError("a formula may call only the functions of Cura and math")
+        if isinstance(n, ast.Constant) and isinstance(n.value, str) and "__" in n.value:
+            raise ValueError("a formula may not use a string with __")
+
+
 class Formula:
     def __init__(self, expr):
         self.expr = expr.strip()
-        self.code = compile(self.expr, "<setting>", "eval")
-        self.names = {n.id for n in ast.walk(ast.parse(self.expr, mode="eval")) if isinstance(n, ast.Name)}
+        tree = ast.parse(self.expr, mode="eval")
+        check_formula(tree)
+        self.code = compile(tree, "<setting>", "eval")
+        self.names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
 
     def __repr__(self):
         return "=" + self.expr
