@@ -334,6 +334,8 @@ def summary(text):
 
 def slice_build(config_path, build):
     job = call("GET", f"/builds/{build}")
+    # The build page links to this run on GitHub.
+    call("POST", f"/builds/{build}/started", {"run_id": os.environ.get("GITHUB_RUN_ID", "")})
     head = git("rev-parse", "HEAD").strip()
     if head != job["commit"]:
         log(f"checking out the commit of the plan, {job['commit'][:7]}")
