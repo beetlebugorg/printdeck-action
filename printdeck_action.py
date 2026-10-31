@@ -294,6 +294,21 @@ def read_stl(path):
     return tris
 
 
+def material_info(part):
+    """The name and the color of the material of a part for the pages: "MatterHackers PLA Black"
+    and "#1a1a1a" for a roll of the profile folder, or the material of printdeck.yml."""
+    mat = str(part.get("material", ""))
+    if part.get("prebuilt") or not part.get("profile"):
+        return mat, ""
+    path, _ = profile_of(part)
+    try:
+        info = json.load(open(os.path.join(path, "cura.json"), encoding="utf-8")).get("materials", {}).get(mat) or {}
+    except (OSError, ValueError):
+        info = {}
+    name = " ".join(x for x in (info.get("brand"), info.get("material"), info.get("color")) if x)
+    return name or mat, info.get("color_code") or ""
+
+
 def bed_and_margin(part):
     """The bed of the printer of the part (X, Y) and the room around each object, in mm."""
     if "bed" in part:
@@ -344,6 +359,7 @@ def plan(config_path):
             sx, sy, sz = max(sx, x), max(sy, y), max(sz, z)
             entry["models"].append(name)
             models[name] = os.path.join(tmp, name)
+        entry["material_name"], entry["material_color"] = material_info(p)
         (bx, by), margin = bed_and_margin(p)
         entry.update({"size_x": round(sx, 2), "size_y": round(sy, 2), "size_z": round(sz, 2), "bed_x": bx, "bed_y": by,
                       "margin": round(margin, 2)})

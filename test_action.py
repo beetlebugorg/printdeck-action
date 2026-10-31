@@ -92,6 +92,22 @@ class Changed(unittest.TestCase):
             os.chdir(cwd)
 
 
+class Material(unittest.TestCase):
+    def test_roll_name_and_color(self):
+        cwd = os.getcwd()
+        d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(d, "profiles"))
+        import shutil
+        shutil.copytree(os.path.join(cwd, "testdata", "taz-workhorse-se"), os.path.join(d, "profiles", "taz-workhorse-se"))
+        os.chdir(d)
+        try:
+            self.assertEqual(pa.material_info({"name": "A", "profile": "taz-workhorse-se/pla-0.10-fine", "material": "roll-4"}),
+                             ("MatterHackers PLA Black", "#1a1a1a"))
+            self.assertEqual(pa.material_info({"name": "R", "prebuilt": "r.cbddlp", "material": "Grey resin"}), ("Grey resin", ""))
+        finally:
+            os.chdir(cwd)
+
+
 class Config(unittest.TestCase):
     def test_checks(self):
         d = tempfile.mkdtemp()
