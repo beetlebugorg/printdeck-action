@@ -189,7 +189,82 @@ def load_config(path):
             inside(f, f"a file of {label(p)}")
         if p.get("prebuilt"):
             inside(p["prebuilt"], f"the prebuilt file of {label(p)}")
+    docs = cfg.get("docs") or []
+    if not isinstance(docs, list) or len(docs) > MAX_DOCS:
+        fail(f"docs of {path} is a list of at most {MAX_DOCS} PDFs")
+    for d in docs:
+        if not isinstance(d, dict) or not d.get("name") or not d.get("file"):
+            fail(f"each doc of {path} needs a name and a file")
+        inside(d["file"], f"the doc {d['name']}")
+        if not str(d["file"]).lower().endswith(".pdf"):
+            fail(f"the doc {d['name']} is not a PDF: {d['file']}")
     return cfg
+
+
+# The docs: the PDFs of the project (a guide, a spec), for the project page.
+MAX_DOCS = 10
+MAX_DOC_SIZE = 50 << 20
+
+
+def poppler():
+    """True when pdftoppm and pdfinfo are on the runner. On GitHub it installs poppler-utils
+    when they are not there."""
+    if shutil.which("pdftoppm") and shutil.which("pdfinfo"):
+        return True
+    if os.environ.get("GITHUB_ACTIONS") == "true" and shutil.which("apt-get"):
+        log("Install poppler-utils for the pictures of the PDFs")
+        r = subprocess.run(["sudo", "apt-get", "install", "-y", "-qq", "poppler-utils"], capture_output=True, text=True)
+        if r.returncode != 0:
+            log(f"  no poppler-utils: {r.stderr.strip()[-300:]}")
+    return bool(shutil.which("pdftoppm") and shutil.which("pdfinfo"))
+
+
+def pdf_pages(path):
+    """The count of the pages of the PDF, or 0 when pdfinfo cannot read it."""
+    r = subprocess.run(["pdfinfo", path], capture_output=True, text=True, timeout=60)
+    m = re.search(r"^Pages:\s+(\d+)", r.stdout, re.M)
+    return int(m.group(1)) if r.returncode == 0 and m else 0
+
+
+def pdf_thumb(path, out):
+    """Writes the first page of the PDF as a PNG 600 pixels wide. Returns False when pdftoppm
+    fails."""
+    stem = out[:-len(".png")]
+    r = subprocess.run(["pdftoppm", "-png", "-f", "1", "-l", "1", "-scale-to-x", "600", "-scale-to-y", "-1",
+                        "-singlefile", path, stem], capture_output=True, text=True, timeout=120)
+    return r.returncode == 0 and os.path.exists(out)
+
+
+def plan_docs(cfg, tmp):
+    """The entries of the docs for the manifest, and the files to upload by name."""
+    docs, files = [], {}
+    entries = cfg.get("docs") or []
+    if not entries:
+        return docs, files
+    tools = poppler()
+    for i, d in enumerate(entries):
+        path = d["file"]
+        if not os.path.isfile(path):
+            fail(f"the doc {d['name']}: no file {path}")
+        size = os.path.getsize(path)
+        if size > MAX_DOC_SIZE:
+            fail(f"the doc {d['name']}: {size >> 20} MB, more than {MAX_DOC_SIZE >> 20} MB")
+        data = open(path, "rb").read()
+        if not data.startswith(b"%PDF"):
+            fail(f"the doc {d['name']}: {path} is not a PDF")
+        entry = {"name": str(d["name"]), "file": path, "pdf": f"doc{i + 1}.pdf", "size": size,
+                 "sha256": hashlib.sha256(data).hexdigest()}
+        files[entry["pdf"]] = (path, "application/pdf")
+        if tools:
+            entry["pages"] = pdf_pages(path)
+            thumb = os.path.join(tmp, f"doc{i + 1}.png")
+            if pdf_thumb(path, thumb):
+                entry["thumb"] = f"doc{i + 1}.png"
+                files[entry["thumb"]] = (thumb, "image/png")
+        docs.append(entry)
+        pages = f", {entry['pages']} pages" if entry.get("pages") else ""
+        log(f"  {d['name']}: {path}, {size // 1024} KB{pages}" + ("" if entry.get("thumb") else ", no picture"))
+    return docs, files
 
 
 def process_of(part):
@@ -455,11 +530,20 @@ def plan(config_path):
         manifest["parts"].append(entry)
         why = changed.get((p["name"], p["variant"]))
         log(f"  {label(p)}: {sx:.0f} x {sy:.0f} x {sz:.0f} mm" + (f", changed: {', '.join(why)}" if why else ""))
+    doc_files = {}
+    if cfg.get("docs"):
+        with group("Read the docs"):
+            manifest["docs"], doc_files = plan_docs(cfg, tmp)
     reply = call("POST", "/plans", manifest)
     with group(f"Upload {len(models)} models"):
         for name, path in models.items():
             upload(reply["grant"], name, open(path, "rb").read(), "model/stl")
             log(f"  {name}: {os.path.getsize(path) // 1024} KB")
+    if doc_files:
+        with group(f"Upload {len(manifest['docs'])} PDFs"):
+            for name, (path, ctype) in doc_files.items():
+                upload(reply["grant"], name, open(path, "rb").read(), ctype)
+                log(f"  {name}: {os.path.getsize(path) // 1024} KB")
     call("POST", f"/plans/{reply['id']}/done")
     log(f"The plan: {reply['url']}")
     print(f"::notice title=Printdeck plan::{len(changed)} of {len(cfg['entries'])} parts changed. Choose the parts: {reply['url']}",

@@ -126,6 +126,9 @@ parts:
     material: Grey resin
     prebuilt: phenom/resin_plate.cbddlp       # a ChiTuBox file in place of a slice
     alone: true                 # never shares a plate
+docs:                           # optional: the PDFs of the project, for the project page
+  - name: Build guide
+    file: bittle_pi_addon/bittle_pi_addon_guide.pdf
 ```
 
 - `variants`: the qualities of a part, for example a fine and a standard print. Each variant has
@@ -154,6 +157,10 @@ parts:
   `adhesion_type` or `brim_line_count`) is for the whole plate: two parts with other values of
   it cannot share a plate, and a value of one part applies to the whole plate.
 - `generate.check`: the dates in 3MF and STEP files do not count.
+- `docs`: at most 10 PDFs, each at most 50 MB, after the generate step. The plan run uploads
+  each PDF with a picture of its first page (`pdftoppm` of poppler-utils; the run installs it on
+  GitHub when the runner has none). The project page shows the PDFs of the newest plan of the
+  default branch, else of the newest plan of a tag, with a link to the file on GitHub.
 
 ## The profiles
 

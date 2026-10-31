@@ -179,3 +179,54 @@ class Base(unittest.TestCase):
             os.chdir(cwd)
             os.environ.clear()
             os.environ.update(old)
+
+
+# A PDF of one page with a black square, with no table of the objects (poppler finds them).
+TINY_PDF = (b"%PDF-1.4\n1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n"
+            b"2 0 obj <</Type/Pages/Kids[3 0 R]/Count 1>> endobj\n"
+            b"3 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 200 283]/Contents 4 0 R>> endobj\n"
+            b"4 0 obj <</Length 22>> stream\n50 100 100 100 re f\nendstream endobj\n"
+            b"trailer <</Root 1 0 R>>\n%%EOF\n")
+
+
+class Docs(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.cwd = os.getcwd()
+        os.chdir(self.dir)
+        os.makedirs("docs")
+        open("docs/guide.pdf", "wb").write(TINY_PDF)
+        open("a.stl", "w").write("x")
+
+    def tearDown(self):
+        os.chdir(self.cwd)
+
+    def config(self, docs):
+        open("printdeck.yml", "w").write("parts:\n  - {name: A, files: [a.stl], printer: taz, profile: p/q}\n" + docs)
+        return pa.load_config("printdeck.yml")
+
+    def test_checks(self):
+        for docs in ("docs: x\n", "docs:\n  - {file: docs/guide.pdf}\n", "docs:\n  - {name: G, file: ../g.pdf}\n",
+                     "docs:\n  - {name: G, file: docs/guide.txt}\n"):
+            with self.assertRaises(SystemExit, msg=docs):
+                self.config(docs)
+        self.assertEqual(len(self.config("docs:\n  - {name: Guide, file: docs/guide.pdf}\n")["docs"]), 1)
+
+    def test_plan_docs(self):
+        cfg = self.config("docs:\n  - {name: Guide, file: docs/guide.pdf}\n")
+        docs, files = pa.plan_docs(cfg, self.dir)
+        self.assertEqual(len(docs), 1)
+        d = docs[0]
+        self.assertEqual((d["name"], d["file"], d["pdf"], d["size"]), ("Guide", "docs/guide.pdf", "doc1.pdf", len(TINY_PDF)))
+        self.assertEqual(files["doc1.pdf"], ("docs/guide.pdf", "application/pdf"))
+        if pa.poppler():
+            self.assertEqual(d["pages"], 1)
+            self.assertEqual(d["thumb"], "doc1.png")
+            png = open(files["doc1.png"][0], "rb").read()
+            self.assertTrue(png.startswith(b"\x89PNG"))
+            self.assertEqual(int.from_bytes(png[16:20], "big"), 600)
+
+    def test_not_a_pdf(self):
+        open("docs/guide.pdf", "wb").write(b"hello")
+        with self.assertRaises(SystemExit):
+            pa.plan_docs(self.config("docs:\n  - {name: Guide, file: docs/guide.pdf}\n"), self.dir)
