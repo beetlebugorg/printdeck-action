@@ -8,9 +8,16 @@ DIR="$1"
 URL="https://github.com/Ultimaker/Cura/releases/download/5.13.0/UltiMaker-Cura-5.13.0-linux-X64.AppImage"
 SHA256="100f068127b2598167f00ba4db0e0699ded45adf97bbab2d22ff171a1e1ecc40"
 
+# The SHA-256 of CuraEngine of that AppImage. A copy in the cache must have it too.
+ENGINE_SHA256="949df48874258ff342b5369853515a93d52fa79448aab050d28ceffe16537f4b"
+
 if [[ -x "$DIR/CuraEngine" ]]; then
-	echo "CuraEngine is in $DIR"
-	exit 0
+	if echo "$ENGINE_SHA256  $DIR/CuraEngine" | sha256sum -c --quiet - 2>/dev/null; then
+		echo "CuraEngine is in $DIR"
+		exit 0
+	fi
+	echo "The CuraEngine of the cache has another SHA-256: getting it again"
+	rm -rf "${DIR:?}"/*
 fi
 mkdir -p "$DIR"
 TMP="$(mktemp -d)"
@@ -20,6 +27,7 @@ curl -fsSL --retry 3 -o "$TMP/cura.AppImage" "$URL"
 echo "$SHA256  $TMP/cura.AppImage" | sha256sum -c -
 chmod +x "$TMP/cura.AppImage"
 (cd "$TMP" && ./cura.AppImage --appimage-extract CuraEngine >/dev/null && ./cura.AppImage --appimage-extract '*.so*' >/dev/null)
+echo "$ENGINE_SHA256  $TMP/squashfs-root/CuraEngine" | sha256sum -c -
 cp "$TMP/squashfs-root/CuraEngine" "$DIR/"
 for lib in libArcus.so libpolyclipping.so.22 'libtbb*.so*' libssl.so.3 libcrypto.so.3; do
 	# shellcheck disable=SC2086

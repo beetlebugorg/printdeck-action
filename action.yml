@@ -27,7 +27,8 @@ runs:
   steps:
     - name: Install PyYAML, for printdeck.yml
       shell: bash
-      run: python3 -m pip install --quiet --disable-pip-version-check "pyyaml>=6,<7"
+      # -I and the folder of the Action: Python loads no module of the checkout.
+      run: cd "$GITHUB_ACTION_PATH" && python3 -I -m pip install --quiet --disable-pip-version-check "pyyaml>=6,<7"
 
     - name: Cache CuraEngine 5.13
       if: inputs.mode == 'slice'
@@ -51,4 +52,4 @@ runs:
       run: |
         export CURAENGINE="$HOME/.cache/printdeck-curaengine-5.13.0/CuraEngine"
         export CURAENGINE_LIB="$HOME/.cache/printdeck-curaengine-5.13.0"
-        python3 "$GITHUB_ACTION_PATH/printdeck_action.py" "$PRINTDECK_MODE" --config "$PRINTDECK_CONFIG" --build "$PRINTDECK_BUILD"
+        python3 -I "$GITHUB_ACTION_PATH/printdeck_action.py" "$PRINTDECK_MODE" --config "$PRINTDECK_CONFIG" --build "$PRINTDECK_BUILD"

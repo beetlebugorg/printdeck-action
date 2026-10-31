@@ -183,6 +183,12 @@ def load_config(path):
         names.add(key)
         if not p.get("prebuilt") and not p.get("profile"):
             fail(f"{label(p)}: a part needs a profile, or a prebuilt file")
+        if not isinstance(p["files"], list):
+            fail(f"{label(p)}: files is a list")
+        for f in p["files"]:
+            inside(f, f"a file of {label(p)}")
+        if p.get("prebuilt"):
+            inside(p["prebuilt"], f"the prebuilt file of {label(p)}")
     return cfg
 
 
@@ -190,10 +196,26 @@ def process_of(part):
     return part.get("process") or PRINTERS.get(str(part["printer"]).lower(), ("fdm",))[0]
 
 
+def inside(path, what="a file"):
+    """The path, after a check that it stays in the repository: a relative path with no "..",
+    which also stays in the repository after its symbolic links. A pull request must not make the
+    run read a file of the runner, for example /etc/passwd or a link to it."""
+    p = str(path)
+    if not p or os.path.isabs(p) or "\\" in p or "\0" in p or any(x == ".." for x in p.split("/")):
+        fail(f"{what} must be a path in the repository: {p}")
+    root = os.path.realpath(os.getcwd())
+    real = os.path.realpath(os.path.join(root, p))
+    if real != root and not real.startswith(root + os.sep):
+        fail(f"{what} leaves the repository: {p}")
+    return p
+
+
 def profile_of(part):
     """The folder of the profile of the part, and the profile in it."""
     folder, _, quality = str(part["profile"]).partition("/")
-    path = os.path.join("profiles", folder)
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", folder) or folder in (".", "..") or not re.fullmatch(r"[A-Za-z0-9._-]+", quality or "x"):
+        fail(f"{part['name']}: a profile is <folder>/<profile>: {part['profile']}")
+    path = inside(os.path.join("profiles", folder), "the folder of a profile")
     if not quality or not os.path.exists(os.path.join(path, "cura.json")):
         fail(f"{part['name']}: no profile {part['profile']} in profiles/")
     return path, quality
@@ -222,11 +244,15 @@ def generate(cfg, files):
     if not gen or os.environ.get("PRINTDECK_SKIP_GENERATE"):  # the switch is for a test on a computer
         return
     before = {f: open(f, "rb").read() for f in files if os.path.exists(f)}
+    # The commands of the repository (of a pull request too) get no way to ask GitHub for a
+    # token: the variables of the OIDC requests and of the token of the run stay out.
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith("ACTIONS_ID_TOKEN_") and k not in ("GITHUB_TOKEN", "ACTIONS_RUNTIME_TOKEN", "PRINTDECK_TOKEN")}
     if gen.get("install"):
         log(f"generate: {gen['install']}")
-        subprocess.run(gen["install"], shell=True, check=True)
+        subprocess.run(gen["install"], shell=True, check=True, env=env)
     log(f"generate: {gen['run']}")
-    subprocess.run(gen["run"], shell=True, check=True)
+    subprocess.run(gen["run"], shell=True, check=True, env=env)
     if not gen.get("check"):
         return
     changed = [f for f in files if f in before and os.path.exists(f) and comparable(f, open(f, "rb").read()) != comparable(f, before[f])]
@@ -250,13 +276,21 @@ def event():
 
 
 def base_commit(ev):
-    """The commit to compare with: the base of a pull request, or the commit before a push. A tag
-    has none."""
+    """The commit to compare with. A tag has none. A pull request: its base. A push to the default
+    branch: the commit before the push. A push to another branch (also a branch of a fork, for a
+    pull request): the merge base with the default branch, so the plan marks all the changes of
+    the branch, and not only the changes of the last push."""
     ref = os.environ.get("GITHUB_REF", "")
     if ref.startswith("refs/tags/"):
         return None
     if "pull_request" in ev:
         return ev["pull_request"]["base"]["sha"]
+    default = (ev.get("repository") or {}).get("default_branch", "")
+    branch = ref.removeprefix("refs/heads/")
+    if default and branch and branch != default:
+        mb = git("merge-base", "HEAD", "origin/" + default).strip()
+        if re.fullmatch(r"[0-9a-f]{40}", mb):
+            return mb
     before = ev.get("before", "")
     if before and set(before) != {"0"}:
         return before
@@ -298,9 +332,26 @@ def changed_parts(cfg, config_path, base, head):
 
 # The models of the plan.
 
+MAX_MODEL = 200 << 20
+
+
+def check_model_size(path):
+    """Refuses a model file over 200 MB, also when a 3MF file unpacks to more."""
+    if os.path.getsize(path) > MAX_MODEL:
+        fail(f"{path} is over 200 MB")
+    if path.lower().endswith(".3mf"):
+        try:
+            total = sum(i.file_size for i in zipfile.ZipFile(path).infolist())
+        except zipfile.BadZipFile:
+            fail(f"{path} is no 3MF file")
+        if total > MAX_MODEL * 2:
+            fail(f"{path} unpacks to over 400 MB")
+
+
 def model_stl(path, out):
     """Writes the model of a part file as an STL for the 3D view: an STL as it is, and the build
     of a 3MF without its support blockers. It returns the size (X, Y, Z) in mm."""
+    check_model_size(path)
     if path.lower().endswith(".3mf"):
         tris = []
         for item in curaslice.read_3mf(path):
@@ -364,11 +415,11 @@ def bed_and_margin(part):
 
 
 def plan(config_path):
+    ev = event()
     cfg = load_config(config_path)
     files = sorted({f for p in cfg["entries"] for f in p["files"]})
     with group("Generate the model files"):
         generate(cfg, files)
-    ev = event()
     head = os.environ.get("GITHUB_SHA") or git("rev-parse", "HEAD").strip()
     pr = 0
     if "pull_request" in ev:
@@ -443,6 +494,9 @@ def slice_build(config_path, build):
     if head != job["commit"]:
         log(f"checking out the commit of the plan, {job['commit'][:7]}")
         subprocess.run(["git", "fetch", "--quiet", "origin", job["commit"]], check=False)
+        if subprocess.run(["git", "cat-file", "-e", job["commit"] + "^{commit}"], check=False).returncode != 0:
+            # The commit of a pull request of a fork is in the refs of the pull requests.
+            subprocess.run(["git", "fetch", "--quiet", "origin", "+refs/pull/*/head:refs/remotes/origin/pull/*"], check=False)
         subprocess.run(["git", "checkout", "--quiet", "--detach", job["commit"]], check=True)
     log(f"Build {build}: {len(job['plates'])} plates of the commit {job['commit'][:7]}")
     try:

@@ -27,14 +27,13 @@ name: printdeck
 run-name: >-
   ${{ github.event_name == 'workflow_dispatch'
       && format('Printdeck slice · {0}', inputs.title || inputs.build)
-      || github.event_name == 'pull_request'
-      && format('Printdeck plan · PR #{0}: {1}', github.event.pull_request.number, github.event.pull_request.title)
       || '' }}
 on:
+  # Each push of a branch or a tag sends a plan. Printdeck makes the plan of a branch with an open
+  # pull request the plan of that pull request, also for a branch of a member's fork.
   push:
-    branches: [main]
+    branches: ["**"]
     tags: ["v*"]
-  pull_request:
   workflow_dispatch:
     inputs:
       build:
@@ -51,12 +50,13 @@ permissions:
 jobs:
   plan:
     name: Plan the printed parts
-    if: github.event_name != 'workflow_dispatch'
+    if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # the base of the pull request, to find the parts that changed
+          fetch-depth: 0   # the default branch, to find the parts that changed on a branch
+          persist-credentials: false   # the code of a pull request reads no token in .git/config
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -81,7 +81,28 @@ jobs:
           build: ${{ inputs.build }}
 ```
 
-A pull request from a fork gets no OIDC token, so it sends no plan.
+### Pull requests of members' forks
+
+A member of the project can fork the repository, push a branch to the fork, and open a pull
+request. The fork has the same workflow, so the push runs the plan job in the fork, with the
+OIDC token of the fork. The repository of the project runs nothing for a fork.
+
+Printdeck takes the plan of a fork's token only when all of these are true:
+
+1. GitHub signed the token, for the audience of Printdeck, and it is not used already.
+2. The repository of the token is a fork of the repository of a project.
+3. The owner of the fork is a member of that project, with that GitHub username on the project
+   page. The owner of the project sets the usernames.
+4. An open pull request of the fork into the repository of the project has the commit of the
+   token as its head.
+
+The plan is then the plan of that pull request, with the name of the member. A pull request of a
+stranger, or a push to a fork with no pull request, makes no plan. A fork cannot slice: only
+`printdeck.yml` on the default branch of the project's repository fills a build, and it reads
+the commit of the pull request as data.
+
+The member turns on the Actions of the fork once (GitHub turns them off in a new fork). The
+GitHub App of Printdeck needs the permission Pull requests: Read, to find the pull request.
 
 ## printdeck.yml
 

@@ -1,6 +1,7 @@
 """Tests of printdeck_action.py. Run: python3 -m unittest test_action"""
 
 import io
+import json
 import os
 import subprocess
 import tempfile
@@ -123,3 +124,58 @@ class Config(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Paths(unittest.TestCase):
+    def test_paths_stay_in_the_repository(self):
+        d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(d, "stl"))
+        open(os.path.join(d, "stl", "a.stl"), "w").write("x")
+        os.symlink("/etc/passwd", os.path.join(d, "stl", "passwd.stl"))
+        os.symlink(os.path.join(d, "stl"), os.path.join(d, "inside"))
+        cwd = os.getcwd()
+        os.chdir(d)
+        try:
+            self.assertEqual(pa.inside("stl/a.stl"), "stl/a.stl")
+            self.assertEqual(pa.inside("inside/a.stl"), "inside/a.stl")  # a link in the repository
+            for bad in ("/etc/passwd", "../x.stl", "stl/../../x", "stl/passwd.stl", "", "a\\b"):
+                with self.assertRaises(SystemExit, msg=bad):
+                    pa.inside(bad)
+            for prof in ("../x/y", "a/../../b", "a/b/c"):
+                with self.assertRaises(SystemExit, msg=prof):
+                    pa.profile_of({"name": "A", "profile": prof})
+        finally:
+            os.chdir(cwd)
+
+
+class Base(unittest.TestCase):
+    def test_a_branch_compares_with_the_merge_base(self):
+        d = tempfile.mkdtemp()
+        run = lambda *a: subprocess.run(["git", *a], cwd=d, check=True, capture_output=True, text=True).stdout.strip()
+        run("init", "-q", "-b", "main")
+        run("config", "user.email", "t@example.org")
+        run("config", "user.name", "T")
+        open(os.path.join(d, "a"), "w").write("1")
+        run("add", ".")
+        run("commit", "-q", "-m", "one")
+        base = run("rev-parse", "HEAD")
+        run("checkout", "-q", "-b", "door")
+        for n in ("2", "3"):
+            open(os.path.join(d, "a"), "w").write(n)
+            run("commit", "-qam", n)
+        run("update-ref", "refs/remotes/origin/main", base)
+        cwd = os.getcwd()
+        os.chdir(d)
+        old = dict(os.environ)
+        try:
+            os.environ["GITHUB_REF"] = "refs/heads/door"
+            ev = {"before": "x" * 40, "repository": {"default_branch": "main"}}
+            self.assertEqual(pa.base_commit(ev), base)  # all the commits of the branch
+            os.environ["GITHUB_REF"] = "refs/heads/main"
+            self.assertEqual(pa.base_commit(dict(ev, before="ab" * 20)), "ab" * 20)  # the last push
+            os.environ["GITHUB_REF"] = "refs/tags/v1"
+            self.assertIsNone(pa.base_commit(ev))
+        finally:
+            os.chdir(cwd)
+            os.environ.clear()
+            os.environ.update(old)
