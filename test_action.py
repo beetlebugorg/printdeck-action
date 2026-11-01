@@ -230,3 +230,25 @@ class Docs(unittest.TestCase):
         open("docs/guide.pdf", "wb").write(b"hello")
         with self.assertRaises(SystemExit):
             pa.plan_docs(self.config("docs:\n  - {name: Guide, file: docs/guide.pdf}\n"), self.dir)
+
+
+class Digest(unittest.TestCase):
+    def test_digest_of_a_part(self):
+        d = tempfile.mkdtemp()
+        cwd = os.getcwd()
+        os.chdir(d)
+        try:
+            os.makedirs("profiles/taz")
+            open("profiles/taz/cura.json", "w").write("{}")
+            threemf("a.3mf", "2026-10-01")
+            p = {"name": "A", "variant": "", "files": ["a.3mf"], "printer": "taz", "profile": "taz/q", "count": 1}
+            first = pa.part_digest(p)
+            self.assertEqual(len(first), 64)
+            threemf("a.3mf", "2026-10-31")  # only the date changed
+            self.assertEqual(pa.part_digest(p), first)
+            self.assertEqual(pa.part_digest(dict(p, count=4)), first)
+            self.assertNotEqual(pa.part_digest(dict(p, settings={"adhesion_type": "brim"})), first)
+            open("profiles/taz/cura.json", "w").write('{"x": 1}')
+            self.assertNotEqual(pa.part_digest(p), first)
+        finally:
+            os.chdir(cwd)

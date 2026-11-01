@@ -405,6 +405,27 @@ def changed_parts(cfg, config_path, base, head):
     return out
 
 
+def part_digest(p):
+    """The SHA-256 of what makes the plate of a part: its entry in printdeck.yml (with no count),
+    the content of its files (comparable), its prebuilt file, and the files of its profile. The
+    service keeps a waiting plate when a newer plan has its parts with the same digests."""
+    h = hashlib.sha256()
+    h.update(json.dumps({k: v for k, v in p.items() if k != "count"}, sort_keys=True, default=str).encode())
+    for f in list(p["files"]) + ([p["prebuilt"]] if p.get("prebuilt") else []):
+        data = open(f, "rb").read()
+        h.update(f"\0{f}\0{len(data)}\0".encode())
+        h.update(comparable(f, data))
+    if p.get("profile"):
+        folder = os.path.join("profiles", str(p["profile"]).partition("/")[0])
+        for root, dirs, names in os.walk(folder):
+            dirs.sort()
+            for n in sorted(names):
+                path = os.path.join(root, n)
+                h.update(f"\0{path}\0".encode())
+                h.update(open(path, "rb").read())
+    return h.hexdigest()
+
+
 # The models of the plan.
 
 MAX_MODEL = 200 << 20
@@ -524,6 +545,7 @@ def plan(config_path):
             entry["models"].append(name)
             models[name] = os.path.join(tmp, name)
         entry["material_name"], entry["material_color"] = material_info(p)
+        entry["digest"] = part_digest(p)
         (bx, by), margin = bed_and_margin(p)
         entry.update({"size_x": round(sx, 2), "size_y": round(sy, 2), "size_z": round(sz, 2), "bed_x": bx, "bed_y": by,
                       "margin": round(margin, 2)})
