@@ -34,8 +34,9 @@ def layer(i):
 
 
 RESIN = dict(bed=(30, 20, 100), resolution=(W, H), mirror=True, layer_height=0.05,
-             exposure=8, bottom_exposure=60, bottom_layers=2, light_off=1, bottom_light_off=2,
-             lift=5, lift_speed=60, bottom_lift=6, bottom_lift_speed=30, retract_speed=120)
+             exposure=8, bottom_exposure=60, bottom_layers=1, transition_layers=1, light_off=1, bottom_light_off=2,
+             lift=5, lift_speed=60, bottom_lift=6, bottom_lift_speed=30, retract_speed=120, bottom_retract_speed=90,
+             rest_after_retract=3)
 
 
 def decode(data, resx, resy):
@@ -65,8 +66,17 @@ class TestCbddlp(unittest.TestCase):
         data = open(self.out, "rb").read()
         u = lambda off: struct.unpack_from("<I", data, off)[0]
         f = lambda off: struct.unpack_from("<f", data, off)[0]
-        self.assertEqual(u(0), resinslice.MAGIC_CBDDLP)
-        self.assertEqual((u(52), u(56), u(68), u(48)), (W, H, 4, 2))
+        self.assertEqual((u(0), u(4)), (resinslice.MAGIC_CBDDLP, 4))
+        self.assertEqual((u(52), u(56), u(68), u(48)), (W, H, 4, 1))
+        self.assertEqual(zlib.crc32(data[:-4]), u(len(data) - 4))
+        # The slicer block: the name of the printer, the transition layers, the parameters of version 4.
+        self.assertEqual((u(104), u(108)), (172, 76))
+        name_at, name_len = u(200), u(204)
+        self.assertEqual(data[name_at:name_at + name_len], b"Peopoly Phenom")
+        self.assertEqual((u(232), u(236)), (1, 248))
+        self.assertEqual(f(224), 3)
+        notice_at, notice_len = u(248 + 72), u(248 + 76)
+        self.assertTrue(data[notice_at:notice_at + notice_len].startswith(b"Layout and record format"))
         self.assertEqual(u(80), 1)
         self.assertAlmostEqual(f(28), 0.2, places=5)
         # The print parameters: the lifts and the volume.
@@ -78,7 +88,14 @@ class TestCbddlp(unittest.TestCase):
         for i in range(4):
             z, light, off, addr, size = struct.unpack_from("<fffII", data, table + i * resinslice.LAYER_DEF)
             self.assertAlmostEqual(z, 0.05 * (i + 1), places=5)
-            self.assertEqual((light, off), (60, 2) if i < 2 else (8, 1))
+            # Layer 0 is a bottom layer, and layer 1 the transition layer half way to the exposure.
+            self.assertEqual((light, off), [(60, 2), (34, 1), (8, 1), (8, 1)][i])
+            # The record before the data: the entry of the table, the sizes, the lift and the rest.
+            rec = data[addr - resinslice.LAYER_RECORD:addr]
+            self.assertEqual(rec[:36], data[table + i * 36:table + i * 36 + 36])
+            total, lift, speed, _, _, retract = struct.unpack_from("<I5f", rec, 36)
+            self.assertEqual((total, lift, speed, retract), (size + 84, 6, 30, 90) if i == 0 else (size + 84, 5, 60, 120))
+            self.assertEqual(struct.unpack_from("<2f", rec, 76), (3, 255))
             got = decode(data[addr:addr + size], W, H)
             want = [[1 if v >= 128 else 0 for v in reversed(r)] for r in layer(i)]
             self.assertEqual(got, want, "layer %d" % i)
