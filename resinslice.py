@@ -334,3 +334,209 @@ def write_cbddlp(sl1, out, resin, now=None):
                                            lay.retract_speed, 0, 0, 0, 0, lay.rest, float(lay.pwm)) + d)
         f.write(struct.pack("<I", crc))
     return {"layers": n, "height": round(n * lh, 3), "seconds": round(seconds), "ml": round(ml, 2), "grams": round(grams, 1)}
+
+
+# The profiles and the plates.
+#
+# A resin profile is profiles/<folder>/resin.json in the repository:
+#
+#   {"printer": {"name": "Peopoly Phenom", "bed": [276.48, 155.52, 400], "resolution": [3840, 2160],
+#                "mirror": true, "margin": 4, "prusaslicer": {...}},
+#    "profiles": {"<name>": {"name": "...", "layer_height": 0.05, "exposure": 18, ...,
+#                            "prusaslicer": {...}}}}
+#
+# The printer and the profile can set PrusaSlicer settings of the supports, the pad and the
+# hollowing (PRUSASLICER_KEYS). The settings of a part in printdeck.yml add to them, for the whole
+# plate. The module sets the screen and the bed of PrusaSlicer from the printer.
+
+import json
+import math
+import os
+import re
+import shutil
+import subprocess
+
+PRUSASLICER_KEYS = {
+    "supports_enable", "support_tree_type", "support_head_front_diameter", "support_head_penetration",
+    "support_head_width", "support_pillar_diameter", "support_small_pillar_diameter_percent",
+    "support_max_bridges_on_pillar", "support_max_bridge_length", "support_max_pillar_link_distance",
+    "support_pillar_connection_mode", "support_buildplate_only", "support_enforcers_only",
+    "support_points_density_relative", "support_points_minimal_distance", "support_object_elevation",
+    "support_critical_angle", "support_base_diameter", "support_base_height",
+    "pad_enable", "pad_wall_thickness", "pad_wall_height", "pad_brim_size", "pad_max_merge_distance",
+    "pad_wall_slope", "pad_around_object", "pad_around_object_everywhere", "pad_object_gap",
+    "pad_object_connector_stride", "pad_object_connector_width", "pad_object_connector_penetration",
+    "hollowing_enable", "hollowing_min_thickness", "hollowing_quality", "hollowing_closing_distance",
+    "elefant_foot_compensation", "material_correction", "slice_closing_radius",
+}
+SETTING_VALUE = re.compile(r"^[A-Za-z0-9._%,-]{1,40}$")
+
+# The settings of a profile, with their limits. A value out of its limits stops the run.
+RESIN_LIMITS = {
+    "layer_height": (0.01, 0.2), "exposure": (0.5, 300), "bottom_exposure": (1, 600), "bottom_layers": (0, 100),
+    "transition_layers": (0, 100), "light_off": (0, 60), "bottom_light_off": (0, 60), "lift": (0.5, 30),
+    "lift_speed": (1, 600), "bottom_lift": (0.5, 30), "bottom_lift_speed": (1, 600), "retract_speed": (1, 600),
+    "bottom_retract_speed": (1, 600), "rest_after_retract": (0, 60), "pwm": (1, 255), "bottom_pwm": (1, 255),
+    "density": (0.5, 3), "cost_per_ml": (0, 10),
+}
+REQUIRED = ("layer_height", "exposure", "bottom_exposure", "bottom_layers", "light_off", "bottom_light_off", "lift",
+            "lift_speed", "bottom_lift", "bottom_lift_speed", "retract_speed")
+
+
+class ProfileError(ValueError):
+    pass
+
+
+def prusaslicer_settings(d, what):
+    """The PrusaSlicer settings of d, checked against PRUSASLICER_KEYS."""
+    out = {}
+    for k, v in (d or {}).items():
+        v = str(int(v) if isinstance(v, bool) else v)
+        if k not in PRUSASLICER_KEYS:
+            raise ProfileError(f"{what}: {k} is not a PrusaSlicer setting of the supports, the pad or the hollowing")
+        if not SETTING_VALUE.match(v):
+            raise ProfileError(f"{what}: a bad value of {k}: {v!r}")
+        out[k] = v
+    return out
+
+
+def load_profile(profile_dir, name):
+    """The settings of the profile name of profiles/<folder>/resin.json, for write_cbddlp, with
+    "prusaslicer": the PrusaSlicer settings of the printer and of the profile, and "margin": the
+    room around each part on the plate in mm."""
+    try:
+        doc = json.load(open(os.path.join(profile_dir, "resin.json"), encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise ProfileError(f"{profile_dir}/resin.json: {e}")
+    printer, prof = doc.get("printer") or {}, (doc.get("profiles") or {}).get(name)
+    if prof is None:
+        raise ProfileError(f"{profile_dir}/resin.json has no profile {name}")
+    out = {k: v for k, v in prof.items() if k != "prusaslicer"}
+    for k in REQUIRED:
+        if k not in out:
+            raise ProfileError(f"the profile {name} needs {k}")
+    for k, (lo, hi) in RESIN_LIMITS.items():
+        if k in out:
+            v = float(out[k])
+            if not lo <= v <= hi:
+                raise ProfileError(f"the profile {name}: {k} is {v}, out of {lo} to {hi}")
+    try:
+        bed = [float(v) for v in printer["bed"]]
+        res = [int(v) for v in printer["resolution"]]
+    except (KeyError, TypeError, ValueError):
+        raise ProfileError(f"{profile_dir}/resin.json: the printer needs bed [x, y, z] and resolution [x, y]")
+    if len(bed) != 3 or len(res) != 2 or min(bed) <= 0 or not (100 <= res[0] <= 20000 and 100 <= res[1] <= 20000):
+        raise ProfileError(f"{profile_dir}/resin.json: a bad bed or resolution")
+    out.update(bed=bed, resolution=res, mirror=bool(printer.get("mirror", True)), margin=float(printer.get("margin", 4)),
+               printer_name=str(printer.get("name", "")))
+    ps = prusaslicer_settings(printer.get("prusaslicer"), "the printer")
+    ps.update(prusaslicer_settings(prof.get("prusaslicer"), f"the profile {name}"))
+    out["prusaslicer"] = ps
+    return out
+
+
+def prusaslicer_ini(resin, settings):
+    """The text of the PrusaSlicer config for the profile resin and the settings of the plate."""
+    bx, by, bz = resin["bed"]
+    rx, ry = resin["resolution"]
+    cfg = {
+        "printer_technology": "SLA", "display_width": f"{bx:g}", "display_height": f"{by:g}",
+        "display_pixels_x": str(rx), "display_pixels_y": str(ry), "display_orientation": "landscape",
+        # The layers as the slicer shows the plate: write_cbddlp makes the mirror of the printer.
+        "display_mirror_x": "0", "display_mirror_y": "0",
+        "bed_shape": f"0x0,{bx:g}x0,{bx:g}x{by:g},0x{by:g}", "max_print_height": f"{bz:g}",
+        "layer_height": f"{float(resin['layer_height']):g}", "initial_layer_height": f"{float(resin['layer_height']):g}",
+        "exposure_time": f"{float(resin['exposure']):g}", "initial_exposure_time": f"{float(resin['bottom_exposure']):g}",
+        "faded_layers": str(int(resin.get("transition_layers", 0)) or 3),
+        "material_density": f"{float(resin.get('density', 1.1)):g}",
+    }
+    cfg.update(resin["prusaslicer"])
+    cfg.update(prusaslicer_settings(settings, "the settings of the plate"))
+    return "".join(f"{k} = {v}\n" for k, v in cfg.items())
+
+
+def read_triangles(path):
+    """The triangles of an STL file (binary or text), or of all the meshes of a 3MF file."""
+    if path.lower().endswith(".3mf"):
+        import curaslice
+        return [t for item in curaslice.read_3mf(path) for m in item for t in m["triangles"]]
+    data = open(path, "rb").read()
+    n = struct.unpack_from("<I", data, 80)[0] if len(data) >= 84 else 0
+    if len(data) == 84 + 50 * n:
+        return [(v[3:6], v[6:9], v[9:12]) for v in (struct.unpack_from("<12f", data, 84 + 50 * i) for i in range(n))]
+    vs = [tuple(map(float, m)) for m in re.findall(rb"vertex\s+(\S+)\s+(\S+)\s+(\S+)", data)]
+    return [tuple(vs[i:i + 3]) for i in range(0, len(vs) - 2, 3)]
+
+
+def plate_layout(sizes, bed, margin, edge=10.0):
+    """The middles of the objects of the sizes [(x, y)] on the bed (x, y) in mm, from the corner of
+    the bed: in rows, with the room margin around each, edge from the edges, and the grid in the
+    middle. It is the grid of curaslice.layout, which the plan page also uses."""
+    bx, by = bed[0], bed[1]
+    if len(sizes) == 1:
+        w, d = sizes[0]
+        if w > bx or d > by:
+            raise ProfileError(f"the part ({w:.0f} x {d:.0f} mm) does not fit on the screen ({bx:.0f} x {by:.0f} mm)")
+        return [(bx / 2, by / 2)]
+    cw = max(w for w, _ in sizes) + 2 * margin
+    cd = max(d for _, d in sizes) + 2 * margin
+    cols = max(1, int((bx - 2 * edge) // cw))
+    rows = math.ceil(len(sizes) / cols)
+    if rows * cd > by - 2 * edge:
+        fit = cols * max(0, int((by - 2 * edge) // cd))
+        raise ProfileError(f"{len(sizes)} objects do not fit on the screen: {fit} fit")
+    cols = min(cols, len(sizes))
+    return [(bx / 2 + (c - (cols - 1) / 2) * cw, by / 2 + ((rows - 1) / 2 - r) * cd)
+            for r, c in (divmod(i, cols) for i in range(len(sizes)))]
+
+
+def prusaslicer_command(folder):
+    """The command of PrusaSlicer: $PRUSASLICER, else the Flathub app with access to folder only."""
+    if os.environ.get("PRUSASLICER"):
+        return [os.environ["PRUSASLICER"]]
+    if not shutil.which("flatpak"):
+        raise ProfileError("no PrusaSlicer: set PRUSASLICER, or install com.prusa3d.PrusaSlicer from Flathub")
+    return ["flatpak", "run", "--die-with-parent", f"--filesystem={folder}", "--nofilesystem=home",
+            "--command=prusa-slicer", "com.prusa3d.PrusaSlicer"]
+
+
+def slice_plate(profile_dir, name, parts, out, folder, log=print):
+    """Slices a resin plate into the .cbddlp out. parts are (label, files, count, settings). The
+    files of each part are one object; each copy is an object of its own on the plate. folder is
+    an empty folder for the work. Returns the facts of the plate and of the profile."""
+    resin = load_profile(profile_dir, name)
+    settings = {}
+    for _, _, _, s in parts:
+        settings.update(s or {})
+    objects = []
+    for lab, files, count, _ in parts:
+        tris = [t for f in files for t in read_triangles(f)]
+        if not tris:
+            raise ProfileError(f"{lab}: no triangles")
+        xs = [p[0] for t in tris for p in t]
+        ys = [p[1] for t in tris for p in t]
+        zs = [p[2] for t in tris for p in t]
+        size = (max(xs) - min(xs), max(ys) - min(ys))
+        if max(zs) - min(zs) + float(settings.get("support_object_elevation", resin["prusaslicer"].get("support_object_elevation", 5))) > resin["bed"][2]:
+            raise ProfileError(f"{lab} is taller than the printer")
+        mid = ((max(xs) + min(xs)) / 2, (max(ys) + min(ys)) / 2, min(zs))
+        objects += [(lab, tris, size, mid)] * int(count)
+    places = plate_layout([o[2] for o in objects], resin["bed"], resin["margin"])
+    import curaslice
+    stls = []
+    for i, ((lab, tris, _, mid), (x, y)) in enumerate(zip(objects, places)):
+        p = os.path.join(folder, f"object-{i + 1}.stl")
+        curaslice.write_stl(p, tris, x - mid[0], y - mid[1], -mid[2])
+        stls.append(p)
+        log(f"  {lab}: at X {x:.1f}, Y {y:.1f} mm")
+    ini = os.path.join(folder, "printer.ini")
+    open(ini, "w").write(prusaslicer_ini(resin, settings))
+    sl1 = os.path.join(folder, "plate.sl1")
+    cmd = prusaslicer_command(folder) + ["--export-sla", "--load", ini, "--merge", "--dont-arrange"] + stls + ["--output", sl1]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+    if r.returncode != 0 or not os.path.exists(sl1):
+        raise ProfileError(f"PrusaSlicer failed ({r.returncode}): {(r.stderr or r.stdout).strip()[-1500:]}")
+    facts = write_cbddlp(sl1, out, resin)
+    facts["layer_height"] = float(resin["layer_height"])
+    facts["profile_name"] = str(resin.get("name") or name)
+    return facts

@@ -1,6 +1,7 @@
 """Tests of resinslice: a small .sl1 file with known layers goes to a .cbddlp, and the test reads
 it back as the deck reads it (deck/internal/chitu/sliced.go)."""
 
+import json
 import os
 import struct
 import tempfile
@@ -115,3 +116,143 @@ class TestCbddlp(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+PROFILE = {"printer": {"name": "Test", "bed": [60, 40, 100], "resolution": [W, H], "mirror": True, "margin": 2,
+                       "prusaslicer": {"supports_enable": 1, "pad_enable": 0}},
+           "profiles": {"p": dict({k: v for k, v in RESIN.items() if k not in ("bed", "resolution", "mirror")},
+                                  name="Test resin", prusaslicer={"support_object_elevation": 3})}}
+
+# A stand-in for PrusaSlicer: it writes an .sl1 with two layers (W x H), and the arguments.
+FAKE_SLICER = """#!/usr/bin/env python3
+import json, struct, sys, zipfile, zlib
+args = sys.argv[1:]
+out = args[args.index("--output") + 1]
+def chunk(k, d): return struct.pack(">I", len(d)) + k + d + struct.pack(">I", zlib.crc32(k + d))
+rows = b"".join(b"\\0" + bytes([255 if 100 < x < 200 else 0 for x in range(%d)]) for _ in range(%d))
+png = (b"\\x89PNG\\r\\n\\x1a\\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", %d, %d, 8, 0, 0, 0, 0))
+       + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))
+with zipfile.ZipFile(out, "w") as z:
+    z.writestr("config.ini", "layerHeight = 0.05\\nusedMaterial = 1.5\\n")
+    z.writestr("p00000.png", png)
+    z.writestr("p00001.png", png)
+open(out + ".args", "w").write(json.dumps(args))
+""" % (W, H, W, H)
+
+
+class TestPlates(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.prof = os.path.join(self.dir, "prof")
+        os.makedirs(self.prof)
+        self.write(PROFILE)
+
+    def write(self, doc):
+        with open(os.path.join(self.prof, "resin.json"), "w") as f:
+            json.dump(doc, f)
+
+    def test_profile(self):
+        r = resinslice.load_profile(self.prof, "p")
+        self.assertEqual((r["bed"], r["resolution"], r["margin"]), ([60, 40, 100], [W, H], 2))
+        self.assertEqual(r["prusaslicer"], {"supports_enable": "1", "pad_enable": "0", "support_object_elevation": "3"})
+        ini = resinslice.prusaslicer_ini(r, {"pad_enable": True})
+        self.assertIn("display_mirror_x = 0\n", ini)
+        self.assertIn("pad_enable = 1\n", ini)
+        self.assertIn(f"display_pixels_x = {W}\n", ini)
+        for bad in ({"output_filename_format": "x"}, {"post_process": "rm"}, {"pad_enable": "1; rm"}):
+            with self.assertRaises(resinslice.ProfileError, msg=bad):
+                resinslice.prusaslicer_ini(r, bad)
+        with self.assertRaises(resinslice.ProfileError):
+            resinslice.load_profile(self.prof, "other")
+        for k, v in (("exposure", 0), ("lift", 99), ("layer_height", None)):
+            doc = json.loads(json.dumps(PROFILE))
+            if v is None:
+                del doc["profiles"]["p"][k]
+            else:
+                doc["profiles"]["p"][k] = v
+            self.write(doc)
+            with self.assertRaises(resinslice.ProfileError, msg=k):
+                resinslice.load_profile(self.prof, "p")
+
+    def test_layout(self):
+        self.assertEqual(resinslice.plate_layout([(10, 10)], (276, 155), 4), [(138, 77.5)])
+        three = resinslice.plate_layout([(40, 30)] * 3, (276, 155), 4)
+        self.assertEqual([round(x) for x, _ in three], [90, 138, 186])
+        self.assertTrue(all(y == 77.5 for _, y in three))
+        with self.assertRaises(resinslice.ProfileError):
+            resinslice.plate_layout([(300, 10)], (276, 155), 4)
+        with self.assertRaises(resinslice.ProfileError):
+            resinslice.plate_layout([(100, 100)] * 4, (276, 155), 4)
+
+    def test_slice_plate(self):
+        fake = os.path.join(self.dir, "slicer")
+        open(fake, "w").write(FAKE_SLICER)
+        os.chmod(fake, 0o755)
+        stl = os.path.join(self.dir, "a.stl")
+        tri = ((0, 0, 2), (4, 0, 2), (0, 3, 6))
+        with open(stl, "wb") as f:
+            f.write(b"\0" * 80 + struct.pack("<I", 1) + struct.pack("<12fH", 0, 0, 0, *tri[0], *tri[1], *tri[2], 0))
+        work = os.path.join(self.dir, "work")
+        os.makedirs(work)
+        out = os.path.join(self.dir, "plate.cbddlp")
+        old = os.environ.get("PRUSASLICER")
+        os.environ["PRUSASLICER"] = fake
+        try:
+            facts = resinslice.slice_plate(self.prof, "p", [("A", [stl], 2, {"pad_enable": 1})], out, work, log=lambda m: None)
+        finally:
+            if old is None:
+                del os.environ["PRUSASLICER"]
+            else:
+                os.environ["PRUSASLICER"] = old
+        self.assertEqual((facts["layers"], facts["ml"], facts["profile_name"]), (2, 1.5, "Test resin"))
+        args = json.load(open(os.path.join(work, "plate.sl1.args")))
+        self.assertEqual(args[:4], ["--export-sla", "--load", os.path.join(work, "printer.ini"), "--merge"])
+        self.assertIn("pad_enable = 1\n", open(os.path.join(work, "printer.ini")).read())
+        # Two copies, each moved to its place: the middle of the copy at its place, at Z 0.
+        xs = []
+        for i in (1, 2):
+            data = open(os.path.join(work, f"object-{i}.stl"), "rb").read()
+            v = struct.unpack_from("<12f", data, 84)
+            self.assertEqual((v[5], v[8], v[11]), (0, 0, 4))
+            xs.append((v[3] + v[6]) / 2)
+        self.assertEqual([round(x, 1) for x in xs], [26.0, 34.0])
+        self.assertEqual(open(out, "rb").read()[:4], struct.pack("<I", resinslice.MAGIC_CBDDLP))
+
+
+@unittest.skipUnless(os.environ.get("PRUSASLICER"), "PRUSASLICER is not set")
+class TestRealSlice(unittest.TestCase):
+    """A real slice with PrusaSlicer and the Phenom profile of testdata: two 10 mm cubes and a
+    20 mm cube on one plate. PRINTDECK_ARTIFACTS keeps the .cbddlp for a check with the deck."""
+
+    def test_phenom_plate(self):
+        from test_curaslice import cube
+        d = tempfile.mkdtemp()
+        small, big = os.path.join(d, "small.stl"), os.path.join(d, "big.stl")
+        cube(small, 10)
+        cube(big, 20)
+        work = os.path.join(d, "work")
+        os.makedirs(work)
+        out = os.path.join(os.environ.get("PRINTDECK_ARTIFACTS") or d, "cubes.cbddlp")
+        prof = os.path.join(os.path.dirname(os.path.abspath(__file__)), "testdata", "peopoly-phenom")
+        facts = resinslice.slice_plate(prof, "abs-like-0.05", [("Small", [small], 2, {}), ("Big", [big], 1, {})], out, work)
+        print(facts)
+        self.assertGreater(facts["layers"], 400)  # 20 mm, with the supports and the pad under it
+        data = open(out, "rb").read()
+        u = lambda off: struct.unpack_from("<I", data, off)[0]
+        rx, ry, table, n = u(52), u(56), u(64), u(68)
+        self.assertEqual((rx, ry, u(80)), (3840, 2160, 1))
+        # A layer 15 mm under the top of the big cube, in all three cubes: the big cube is on the
+        # right of the plate as the slicer shows it, and the screen has the mirror (projector 1).
+        i = n - 1 - int(15 / 0.05)
+        addr, size = struct.unpack_from("<II", data, table + 36 * i + 12)
+        rows = decode(data[addr:addr + size], rx, ry)
+        lit = [x for x in range(rx) if rows[ry // 2][x]]
+        px = 276.48 / rx
+        groups, start = [], lit[0]
+        for a, b in zip(lit, lit[1:] + [None]):
+            if b is None or b - a > 1:
+                groups.append(((rx - 1 - a) * px, (rx - 1 - start) * px))  # back to the view of the slicer, in mm
+                start = b
+        groups.sort()
+        widths = [round(hi - lo) for lo, hi in groups]
+        self.assertEqual(widths, [10, 10, 20], groups)

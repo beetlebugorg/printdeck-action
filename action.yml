@@ -1,5 +1,5 @@
 name: Printdeck plan and slice
-description: Send the plan of the parts of printdeck.yml to Printdeck, or slice the plates of a Printdeck build with CuraEngine.
+description: Send the plan of the parts of printdeck.yml to Printdeck, or slice the plates of a Printdeck build with CuraEngine or PrusaSlicer.
 author: beetlebugorg
 branding:
   icon: box
@@ -30,15 +30,36 @@ runs:
       # -I and the folder of the Action: Python loads no module of the checkout.
       run: cd "$GITHUB_ACTION_PATH" && python3 -I -m pip install --quiet --disable-pip-version-check "pyyaml>=6,<7"
 
-    - name: Cache CuraEngine 5.13
+    - name: Read the plates of the build
+      id: plates
       if: inputs.mode == 'slice'
+      shell: bash
+      env:
+        PRINTDECK_BUILD: ${{ inputs.build }}
+        PRINTDECK_API: ${{ inputs.api }}
+      run: python3 -I "$GITHUB_ACTION_PATH/printdeck_action.py" processes --build "$PRINTDECK_BUILD"
+
+    - name: Cache PrusaSlicer 2.8.1
+      if: steps.plates.outputs.resin == 'true'
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/printdeck-prusaslicer-2.8.1
+        key: printdeck-prusaslicer-2.8.1-linux-x64
+
+    - name: Get PrusaSlicer 2.8.1 (the AppImage, checked by SHA-256)
+      if: steps.plates.outputs.resin == 'true'
+      shell: bash
+      run: bash "$GITHUB_ACTION_PATH/prusaslicer.sh" "$HOME/.cache/printdeck-prusaslicer-2.8.1"
+
+    - name: Cache CuraEngine 5.13
+      if: inputs.mode == 'slice' && steps.plates.outputs.fdm == 'true'
       uses: actions/cache@v4
       with:
         path: ~/.cache/printdeck-curaengine-5.13.0
         key: printdeck-curaengine-5.13.0-linux-x64
 
     - name: Get CuraEngine 5.13 (from the Cura AppImage, checked by SHA-256)
-      if: inputs.mode == 'slice'
+      if: inputs.mode == 'slice' && steps.plates.outputs.fdm == 'true'
       shell: bash
       run: bash "$GITHUB_ACTION_PATH/curaengine.sh" "$HOME/.cache/printdeck-curaengine-5.13.0"
 
@@ -52,4 +73,6 @@ runs:
       run: |
         export CURAENGINE="$HOME/.cache/printdeck-curaengine-5.13.0/CuraEngine"
         export CURAENGINE_LIB="$HOME/.cache/printdeck-curaengine-5.13.0"
+        export PRUSASLICER="$HOME/.cache/printdeck-prusaslicer-2.8.1/squashfs-root/AppRun"
+        export PRUSASLICER_NAME="PrusaSlicer 2.8.1"
         python3 -I "$GITHUB_ACTION_PATH/printdeck_action.py" "$PRINTDECK_MODE" --config "$PRINTDECK_CONFIG" --build "$PRINTDECK_BUILD"

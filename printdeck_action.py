@@ -36,6 +36,7 @@ import yaml
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import curaslice  # noqa: E402
+import resinslice  # noqa: E402
 
 API = os.environ.get("PRINTDECK_API", "https://printdeck.beetlebug.org").rstrip("/")
 # The bed of each printer of printdeck.yml in mm, and its process. A part can name another printer
@@ -268,7 +269,7 @@ def plan_docs(cfg, tmp):
 
 
 def process_of(part):
-    return part.get("process") or PRINTERS.get(str(part["printer"]).lower(), ("fdm",))[0]
+    return part.get("process") or PRINTERS.get(str(part.get("printer", "")).lower(), ("fdm",))[0]
 
 
 def inside(path, what="a file"):
@@ -286,14 +287,28 @@ def inside(path, what="a file"):
 
 
 def profile_of(part):
-    """The folder of the profile of the part, and the profile in it."""
+    """The folder of the profile of the part, and the profile in it. An FDM profile is a Cura
+    stack (cura.json), and a resin profile is in resin.json."""
     folder, _, quality = str(part["profile"]).partition("/")
     if not re.fullmatch(r"[A-Za-z0-9._-]+", folder) or folder in (".", "..") or not re.fullmatch(r"[A-Za-z0-9._-]+", quality or "x"):
         fail(f"{part['name']}: a profile is <folder>/<profile>: {part['profile']}")
     path = inside(os.path.join("profiles", folder), "the folder of a profile")
-    if not quality or not os.path.exists(os.path.join(path, "cura.json")):
-        fail(f"{part['name']}: no profile {part['profile']} in profiles/")
+    stack = "resin.json" if process_of(part) == "resin" else "cura.json"
+    if not quality or not os.path.exists(os.path.join(path, stack)):
+        fail(f"{part['name']}: no profile {part['profile']} in profiles/ ({stack})")
     return path, quality
+
+
+def resin_profile(part):
+    """The settings of the resin profile of the part (resinslice.load_profile), after a check of
+    the settings of the part."""
+    path, quality = profile_of(part)
+    try:
+        resin = resinslice.load_profile(path, quality)
+        resinslice.prusaslicer_settings(part.get("settings"), f"the settings of {label(part)}")
+    except resinslice.ProfileError as e:
+        fail(f"{label(part)}: {e}")
+    return resin
 
 
 # The generate step.
@@ -499,8 +514,11 @@ def bed_and_margin(part):
         bed = tuple(float(x) for x in part["bed"])
     else:
         bed = PRINTERS.get(str(part["printer"]).lower(), ("fdm", (0.0, 0.0)))[1]
-    if part.get("prebuilt") or process_of(part) != "fdm":
+    if part.get("prebuilt") or not part.get("profile"):
         return bed, 0.0
+    if process_of(part) == "resin":
+        resin = resin_profile(part)
+        return ("bed" in part and bed) or tuple(resin["bed"][:2]), resin["margin"]
     path, quality = profile_of(part)
     glob, _, _, _ = curaslice.build(path, quality, part.get("material"), {k: str(v) for k, v in (part.get("settings") or {}).items()})
     gs = {k: glob.get(k) for k in ("machine_width", "machine_depth", "adhesion_type", "brim_line_count", "skirt_brim_line_width",
@@ -664,6 +682,27 @@ def do_slice(config_path, job):
             paths[name] = os.path.join(tmp, name)
             entry["file"] = name
             entry["slicer"] = "prebuilt"
+        elif process_of(first) == "resin":
+            path, quality = profile_of(first)
+            resin_profile(first)
+            name = f"plate-{n}.cbddlp"
+            work = tempfile.mkdtemp(prefix=f"plate-{n}-", dir=tmp)
+            with group(f"Plate {n} of {total}: {title}"):
+                log(f"Printer {first['printer']}, profile {first['profile']}, material {entry['material_name'] or first.get('material')}")
+                t0 = __import__("time").time()
+                try:
+                    facts = resinslice.slice_plate(path, quality, [(label(p), p["files"], c, p.get("settings") or {}) for p, c in parts],
+                                                   os.path.join(tmp, name), work, log=log)
+                except resinslice.ProfileError as e:
+                    raise SystemExit(f"plate {n}: {e}")
+                took = __import__("time").time() - t0
+                paths[name] = os.path.join(tmp, name)
+                entry.update({"file": name, "seconds": int(facts["seconds"]), "ml": facts["ml"], "grams": facts["grams"],
+                              "layers": int(facts["layers"]), "layer_height": facts["layer_height"],
+                              "profile": f"{os.path.basename(path)}/{quality}@{curaslice.profile_version(path)}",
+                              "slicer": os.environ.get("PRUSASLICER_NAME", "PrusaSlicer")})
+                log(f"Sliced in {took:.1f} s: {clock(entry['seconds'])}, {entry['ml']} ml, {entry['layers']} layers of "
+                    f"{entry['layer_height']} mm")
         else:
             path, quality = profile_of(first)
             name = f"plate-{n}.gcode"
@@ -694,12 +733,21 @@ def do_slice(config_path, job):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("mode", choices=["plan", "slice"])
+    ap.add_argument("mode", choices=["plan", "slice", "processes"])
     ap.add_argument("--config", default="printdeck.yml")
     ap.add_argument("--build", default="")
     a = ap.parse_args()
     if a.mode == "plan":
         plan(a.config)
+    elif a.mode == "processes":
+        # For the steps of action.yml: the slicers that the plates of the build need.
+        if not re.fullmatch(r"[a-z0-9]{1,40}", a.build):
+            fail("processes needs the ID of a build")
+        procs = {pl.get("process") or "fdm" for pl in call("GET", f"/builds/{a.build}")["plates"]}
+        with open(os.environ.get("GITHUB_OUTPUT", os.devnull), "a") as f:
+            for k in ("fdm", "resin"):
+                f.write(f"{k}={'true' if k in procs else 'false'}\n")
+        log(f"The plates need: {', '.join(sorted(procs)) or 'no slicer'}")
     else:
         if not re.fullmatch(r"[a-z0-9]{1,40}", a.build):
             fail("slice needs the ID of a build (the input build of the workflow)")
