@@ -405,7 +405,8 @@ def load_profile(profile_dir, name):
     "prusaslicer": the PrusaSlicer settings of the printer and of the profile, and "margin": the
     room around each part on the plate in mm."""
     try:
-        doc = json.load(open(os.path.join(profile_dir, "resin.json"), encoding="utf-8"))
+        with open(os.path.join(profile_dir, "resin.json"), encoding="utf-8") as f:
+            doc = json.load(f)
     except (OSError, ValueError) as e:
         raise ProfileError(f"{profile_dir}/resin.json: {e}")
     printer, prof = doc.get("printer") or {}, (doc.get("profiles") or {}).get(name)
@@ -460,7 +461,8 @@ def read_triangles(path):
     if path.lower().endswith(".3mf"):
         import curaslice
         return [t for item in curaslice.read_3mf(path) for m in item for t in m["triangles"]]
-    data = open(path, "rb").read()
+    with open(path, "rb") as f:
+        data = f.read()
     n = struct.unpack_from("<I", data, 80)[0] if len(data) >= 84 else 0
     if len(data) == 84 + 50 * n:
         return [(v[3:6], v[6:9], v[9:12]) for v in (struct.unpack_from("<12f", data, 84 + 50 * i) for i in range(n))]
@@ -530,7 +532,8 @@ def slice_plate(profile_dir, name, parts, out, folder, log=print):
         stls.append(p)
         log(f"  {lab}: at X {x:.1f}, Y {y:.1f} mm")
     ini = os.path.join(folder, "printer.ini")
-    open(ini, "w").write(prusaslicer_ini(resin, settings))
+    with open(ini, "w") as f:
+        f.write(prusaslicer_ini(resin, settings))
     sl1 = os.path.join(folder, "plate.sl1")
     cmd = prusaslicer_command(folder) + ["--export-sla", "--load", ini, "--merge", "--dont-arrange"] + stls + ["--output", sl1]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
