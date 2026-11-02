@@ -28,7 +28,6 @@ import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
-import time
 import uuid
 import zipfile
 
@@ -86,16 +85,11 @@ def fail(msg):
 
 # The service.
 
-_token = {"value": "", "at": 0.0}
-
-
 def token():
-    """The OIDC token of GitHub for the service. PRINTDECK_TOKEN takes its place for a test. A
-    token works for 5 minutes: the calls of one run use the same token for 4 minutes."""
+    """The OIDC token of GitHub for the service. PRINTDECK_TOKEN takes its place for a test. The
+    service takes each token one time only, so each call gets a new token."""
     if os.environ.get("PRINTDECK_TOKEN"):
         return os.environ["PRINTDECK_TOKEN"]
-    if _token["value"] and time.time() - _token["at"] < 240:
-        return _token["value"]
     url, req_token = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL"), os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
     if not url or not req_token:
         fail("No OIDC token: the workflow needs the permission id-token: write.")
@@ -103,8 +97,7 @@ def token():
     req = urllib.request.Request(url + "&audience=" + urllib.parse.quote(audience),
                                  headers={"Authorization": "Bearer " + req_token})
     with urllib.request.urlopen(req, timeout=30) as r:
-        _token["value"], _token["at"] = json.load(r)["value"], time.time()
-    return _token["value"]
+        return json.load(r)["value"]
 
 
 def call(method, path, body=None):
@@ -781,9 +774,13 @@ def main():
         if not re.fullmatch(r"[a-z0-9]{1,40}", a.build):
             fail("processes needs the ID of a build")
         # The first step of the run: the build page shows at once that the run started.
-        started(a.build)
-        progress(a.build, "Getting the slicer", PHASE_SETUP)
-        procs = {pl.get("process") or "fdm" for pl in call("GET", f"/builds/{a.build}")["plates"]}
+        try:
+            started(a.build)
+            progress(a.build, "Getting the slicer", PHASE_SETUP)
+            procs = {pl.get("process") or "fdm" for pl in call("GET", f"/builds/{a.build}")["plates"]}
+        except SystemExit:
+            call("POST", f"/builds/{a.build}/failed", {"error": "The slice run failed: see the run on GitHub."})
+            raise
         with open(os.environ.get("GITHUB_OUTPUT", os.devnull), "a") as f:
             for k in ("fdm", "resin"):
                 f.write(f"{k}={'true' if k in procs else 'false'}\n")
