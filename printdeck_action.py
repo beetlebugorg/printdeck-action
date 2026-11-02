@@ -28,10 +28,14 @@ import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
+import time
 import uuid
 import zipfile
 
-import yaml
+try:
+    import yaml
+except ImportError:  # the mode processes reads no YAML, and runs before the install of PyYAML
+    yaml = None
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -82,10 +86,16 @@ def fail(msg):
 
 # The service.
 
+_token = {"value": "", "at": 0.0}
+
+
 def token():
-    """The OIDC token of GitHub for the service. PRINTDECK_TOKEN takes its place for a test."""
+    """The OIDC token of GitHub for the service. PRINTDECK_TOKEN takes its place for a test. A
+    token works for 5 minutes: the calls of one run use the same token for 4 minutes."""
     if os.environ.get("PRINTDECK_TOKEN"):
         return os.environ["PRINTDECK_TOKEN"]
+    if _token["value"] and time.time() - _token["at"] < 240:
+        return _token["value"]
     url, req_token = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL"), os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
     if not url or not req_token:
         fail("No OIDC token: the workflow needs the permission id-token: write.")
@@ -93,7 +103,8 @@ def token():
     req = urllib.request.Request(url + "&audience=" + urllib.parse.quote(audience),
                                  headers={"Authorization": "Bearer " + req_token})
     with urllib.request.urlopen(req, timeout=30) as r:
-        return json.load(r)["value"]
+        _token["value"], _token["at"] = json.load(r)["value"], time.time()
+    return _token["value"]
 
 
 def call(method, path, body=None):
@@ -610,17 +621,29 @@ def summary(text):
 
 # The slice.
 
+def progress(build, text, phase, plate=0):
+    """Tells the build page what the slice run does now."""
+    body = {"text": text, "phase": phase}
+    if plate:
+        body["plate"] = plate
+    call("POST", f"/builds/{build}/progress", body)
+
+
+def started(build):
+    """Tells the service that the run started, with the run ID for the link on the build page."""
+    call("POST", f"/builds/{build}/started", {"run_id": os.environ.get("GITHUB_RUN_ID", "")})
+
 def slice_build(config_path, build):
     job = call("GET", f"/builds/{build}")
-    # The build page links to this run on GitHub.
-    call("POST", f"/builds/{build}/started", {"run_id": os.environ.get("GITHUB_RUN_ID", "")})
+    # The build page links to this run on GitHub. The step processes told the service already;
+    # this call is for a run with no such step.
+    if not os.environ.get("PRINTDECK_STARTED"):
+        started(build)
     head = git("rev-parse", "HEAD").strip()
     if head != job["commit"]:
         log(f"checking out the commit of the plan, {job['commit'][:7]}")
-        subprocess.run(["git", "fetch", "--quiet", "origin", job["commit"]], check=False)
-        if subprocess.run(["git", "cat-file", "-e", job["commit"] + "^{commit}"], check=False).returncode != 0:
-            # The commit of a pull request of a fork is in the refs of the pull requests.
-            subprocess.run(["git", "fetch", "--quiet", "origin", "+refs/pull/*/head:refs/remotes/origin/pull/*"], check=False)
+        progress(build, "Getting the commit of the plan", PHASE_SETUP)
+        fetch_commit(job["commit"])
         subprocess.run(["git", "checkout", "--quiet", "--detach", job["commit"]], check=True)
     log(f"Build {build}: {len(job['plates'])} plates of the commit {job['commit'][:7]}")
     try:
@@ -631,7 +654,7 @@ def slice_build(config_path, build):
     except Exception as e:  # noqa: BLE001: any failure goes to the build page
         call("POST", f"/builds/{build}/failed", {"error": f"The slice run failed: {e}"})
         raise
-    call("POST", f"/builds/{build}/progress", {"text": "Sending the files of the plates"})
+    progress(build, "Sending the files of the plates", PHASE_UPLOAD)
     reply = call("POST", f"/builds/{build}/files", {"plates": [f for f, _ in files]})
     with group("Upload the files"):
         for plate, paths in files:
@@ -654,6 +677,20 @@ def slice_build(config_path, build):
             table(["Plate", "Parts", "Profile", "Material", "Print time", "Filament", "Layers", "File"], rows))
 
 
+PHASE_SETUP, PHASE_SLICE, PHASE_UPLOAD = "setup", "slice", "upload"
+
+
+def fetch_commit(commit):
+    """Fetches the commit of the plan. A shallow checkout (fetch-depth: 1) gets the commit alone,
+    and a partial clone (filter: blob:none) gets its files at the checkout."""
+    shallow = git("rev-parse", "--is-shallow-repository").strip() == "true"
+    depth = ["--depth=1"] if shallow else []
+    subprocess.run(["git", "fetch", "--quiet", *depth, "origin", commit], check=False)
+    if subprocess.run(["git", "cat-file", "-e", commit + "^{commit}"], check=False).returncode != 0:
+        # The commit of a pull request of a fork is in the refs of the pull requests.
+        subprocess.run(["git", "fetch", "--quiet", *depth, "origin", "+refs/pull/*/head:refs/remotes/origin/pull/*"], check=False)
+
+
 def do_slice(config_path, job):
     cfg = load_config(config_path)
     by_name = {(p["name"].lower(), p["variant"].lower()): p for p in cfg["entries"]}
@@ -671,7 +708,7 @@ def do_slice(config_path, job):
         entry = {"printer": plate["printer"], "process": plate["process"], "parts": plate["parts"],
                  "material_name": plate.get("material_name", ""), "material": plate.get("material", "")}
         title = " + ".join(label(p) + (f" x{c}" if c > 1 else "") for p, c in parts)
-        call("POST", f"/builds/{job['id']}/progress", {"text": f"Slicing plate {n} of {total}: {title}"})
+        progress(job["id"], f"Slicing plate {n} of {total}: {title}", PHASE_SLICE, n)
         paths = {}
         if first.get("prebuilt"):
             src = first["prebuilt"]
@@ -743,6 +780,9 @@ def main():
         # For the steps of action.yml: the slicers that the plates of the build need.
         if not re.fullmatch(r"[a-z0-9]{1,40}", a.build):
             fail("processes needs the ID of a build")
+        # The first step of the run: the build page shows at once that the run started.
+        started(a.build)
+        progress(a.build, "Getting the slicer", PHASE_SETUP)
         procs = {pl.get("process") or "fdm" for pl in call("GET", f"/builds/{a.build}")["plates"]}
         with open(os.environ.get("GITHUB_OUTPUT", os.devnull), "a") as f:
             for k in ("fdm", "resin"):

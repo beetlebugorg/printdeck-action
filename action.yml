@@ -25,11 +25,7 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Install PyYAML, for printdeck.yml
-      shell: bash
-      # -I and the folder of the Action: Python loads no module of the checkout.
-      run: cd "$GITHUB_ACTION_PATH" && python3 -I -m pip install --quiet --disable-pip-version-check "pyyaml>=6,<7"
-
+    # The first step of a slice: the build page shows at once that the run started.
     - name: Read the plates of the build
       id: plates
       if: inputs.mode == 'slice'
@@ -38,6 +34,14 @@ runs:
         PRINTDECK_BUILD: ${{ inputs.build }}
         PRINTDECK_API: ${{ inputs.api }}
       run: python3 -I "$GITHUB_ACTION_PATH/printdeck_action.py" processes --build "$PRINTDECK_BUILD"
+
+    - name: Install PyYAML, for printdeck.yml
+      shell: bash
+      # -I and the folder of the Action: Python loads no module of the checkout. A Python with
+      # PyYAML (the Python of the runner image) needs no install.
+      run: |
+        cd "$GITHUB_ACTION_PATH"
+        python3 -I -c "import yaml" 2>/dev/null || python3 -I -m pip install --quiet --disable-pip-version-check "pyyaml>=6,<7"
 
     - name: Cache PrusaSlicer 2.8.1
       if: steps.plates.outputs.resin == 'true'
@@ -70,6 +74,7 @@ runs:
         PRINTDECK_BUILD: ${{ inputs.build }}
         PRINTDECK_CONFIG: ${{ inputs.config }}
         PRINTDECK_API: ${{ inputs.api }}
+        PRINTDECK_STARTED: ${{ steps.plates.outcome == 'success' && '1' || '' }}
       run: |
         export CURAENGINE="$HOME/.cache/printdeck-curaengine-5.13.0/CuraEngine"
         export CURAENGINE_LIB="$HOME/.cache/printdeck-curaengine-5.13.0"

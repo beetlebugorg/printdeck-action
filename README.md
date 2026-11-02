@@ -71,7 +71,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # the commit of the plan
+          # The commit alone, with no history: the Action fetches the commit of the plan, and the
+          # checkout gets only the files of that commit.
+          fetch-depth: 1
+          filter: blob:none
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
