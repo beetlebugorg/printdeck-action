@@ -232,6 +232,36 @@ class Docs(unittest.TestCase):
             pa.plan_docs(self.config("docs:\n  - {name: Guide, file: docs/guide.pdf}\n"), self.dir)
 
 
+class Cover(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.cwd = os.getcwd()
+        os.chdir(self.dir)
+        open("a.stl", "w").write("x")
+        open("render.png", "wb").write(b"\x89PNG\r\n\x1a\nrest")
+        open("render.jpg", "wb").write(b"\xff\xd8\xff\xe0rest")
+        open("fake.png", "wb").write(b"hello")
+
+    def tearDown(self):
+        os.chdir(self.cwd)
+
+    def config(self, cover):
+        open("printdeck.yml", "w").write("parts:\n  - {name: A, files: [a.stl], printer: taz, profile: p/q}\n" + cover)
+        return pa.load_config("printdeck.yml")
+
+    def test_checks(self):
+        for cover in ("cover: [a]\n", "cover: a.stl\n", "cover: ../render.png\n"):
+            with self.assertRaises(SystemExit, msg=cover):
+                self.config(cover)
+
+    def test_plan_cover(self):
+        self.assertEqual(pa.plan_cover(self.config("")), ("", None))
+        self.assertEqual(pa.plan_cover(self.config("cover: render.png\n")), ("cover.png", ("render.png", "image/png")))
+        self.assertEqual(pa.plan_cover(self.config("cover: render.jpg\n")), ("cover.jpg", ("render.jpg", "image/jpeg")))
+        with self.assertRaises(SystemExit):
+            pa.plan_cover(self.config("cover: fake.png\n"))
+
+
 class Digest(unittest.TestCase):
     def test_digest_of_a_part(self):
         d = tempfile.mkdtemp()

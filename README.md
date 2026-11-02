@@ -132,6 +132,7 @@ parts:
     group: The base             # optional: the heading of the part on the Parts tab
     description: |              # optional: a few sentences about the part
       The plate under the pod. Print it in grey resin.
+cover: docs/img/render.png      # optional: a PNG or JPEG picture of the project, at most 5 MB
 docs:                           # optional: the PDFs of the project, for the project page
   - name: Build guide
     file: bittle_pi_addon/bittle_pi_addon_guide.pdf
@@ -171,6 +172,9 @@ docs:                           # optional: the PDFs of the project, for the pro
   `description` is at most 1000 characters, and a variant can change it. `group` is the heading of
   the part on the tab, at most 80 characters, for example "The case". A change of these fields does not mark the part "Changed", and does not
   change its digest.
+- `cover`: a picture of the project, for example a render. The cover of the newest plan of the
+  default branch is the picture of the project in the project lists. A plan of the default
+  branch with no cover removes it, and the newest photo is then the picture.
 - `assemblies`: at most 10 assemblies, for the 3D view and the exploded view on the Parts tab.
   An assembly has a `name` (at most 120 characters, unique), an optional `description` and 1 to
   60 `items`. Each item has a `file`: an STL or 3MF of the model in its place in the assembly, in

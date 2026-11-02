@@ -218,6 +218,11 @@ def load_config(path):
         inside(d["file"], f"the doc {d['name']}")
         if not str(d["file"]).lower().endswith(".pdf"):
             fail(f"the doc {d['name']} is not a PDF: {d['file']}")
+    cover = cfg.get("cover")
+    if cover is not None:
+        if not isinstance(cover, str) or not cover.lower().endswith((".png", ".jpg", ".jpeg")):
+            fail(f"the cover of {path} is a PNG or JPEG file")
+        inside(cover, "the cover")
     check_assemblies(cfg, path)
     return cfg
 
@@ -345,6 +350,32 @@ def plan_docs(cfg, tmp):
         pages = f", {entry['pages']} pages" if entry.get("pages") else ""
         log(f"  {d['name']}: {path}, {size // 1024} KB{pages}" + ("" if entry.get("thumb") else ", no picture"))
     return docs, files
+
+
+# The cover: a picture of the project (a render), for the project lists of the service.
+MAX_COVER_SIZE = 5 << 20
+
+
+def plan_cover(cfg):
+    """The upload name of the cover, and the file and its content type. Returns ("", None)
+    when printdeck.yml has no cover."""
+    path = cfg.get("cover")
+    if not path:
+        return "", None
+    if not os.path.isfile(path):
+        fail(f"the cover: no file {path}")
+    size = os.path.getsize(path)
+    if size > MAX_COVER_SIZE:
+        fail(f"the cover: {size >> 20} MB, more than {MAX_COVER_SIZE >> 20} MB")
+    head = open(path, "rb").read(8)
+    if head.startswith(b"\x89PNG"):
+        name, ctype = "cover.png", "image/png"
+    elif head.startswith(b"\xff\xd8\xff"):
+        name, ctype = "cover.jpg", "image/jpeg"
+    else:
+        fail(f"the cover: {path} is not a PNG or JPEG file")
+    log(f"  the cover: {path}, {size // 1024} KB")
+    return name, (path, ctype)
 
 
 def process_of(part):
@@ -696,6 +727,9 @@ def plan(config_path):
     if cfg.get("assemblies"):
         with group("Read the assemblies"):
             manifest["assemblies"] = plan_assemblies(cfg, tmp, models)
+    cover, cover_file = plan_cover(cfg)
+    if cover:
+        manifest["cover"] = cover
     reply = call("POST", "/plans", manifest)
     with group(f"Upload {len(models)} models"):
         for name, path in models.items():
@@ -706,6 +740,8 @@ def plan(config_path):
             for name, (path, ctype) in doc_files.items():
                 upload(reply["grant"], name, open(path, "rb").read(), ctype)
                 log(f"  {name}: {os.path.getsize(path) // 1024} KB")
+    if cover_file:
+        upload(reply["grant"], cover, open(cover_file[0], "rb").read(), cover_file[1])
     call("POST", f"/plans/{reply['id']}/done")
     log(f"The plan: {reply['url']}")
     print(f"::notice title=Printdeck plan::{len(changed)} of {len(cfg['entries'])} parts changed. Choose the parts: {reply['url']}",
