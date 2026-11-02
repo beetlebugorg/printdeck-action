@@ -247,8 +247,112 @@ class Digest(unittest.TestCase):
             threemf("a.3mf", "2026-10-31")  # only the date changed
             self.assertEqual(pa.part_digest(p), first)
             self.assertEqual(pa.part_digest(dict(p, count=4)), first)
+            # The text of the Parts tab changes no plate.
+            self.assertEqual(pa.part_digest(dict(p, description="The door of the pod.", group="The pod")), first)
             self.assertNotEqual(pa.part_digest(dict(p, settings={"adhesion_type": "brim"})), first)
             open("profiles/taz/cura.json", "w").write('{"x": 1}')
             self.assertNotEqual(pa.part_digest(p), first)
         finally:
             os.chdir(cwd)
+
+
+class TestTextFields(unittest.TestCase):
+    def test_description_and_group(self):
+        d = tempfile.mkdtemp()
+        cwd = os.getcwd()
+        os.chdir(d)
+        try:
+            open("a.stl", "w").write("solid a\nendsolid a\n")
+            def cfg(extra):
+                open("printdeck.yml", "w").write(
+                    "parts:\n  - name: A\n    files: [a.stl]\n    printer: taz\n    profile: taz/q\n" + extra)
+                return pa.load_config("printdeck.yml")
+            e = cfg("    group: The case\n    description: |\n      The front of the case.\n")["entries"][0]
+            self.assertEqual((e["group"], e["description"].strip()), ("The case", "The front of the case."))
+            with self.assertRaises(SystemExit):
+                cfg("    description: [not, text]\n")
+            with self.assertRaises(SystemExit):
+                cfg("    group: " + "x" * 81 + "\n")
+            v = pa.expand([{"name": "A", "description": "a", "variants": [{"name": "fine", "description": "b"}, {"name": "draft"}]}])
+            self.assertEqual([x["description"] for x in v], ["b", "a"])
+        finally:
+            os.chdir(cwd)
+
+
+class Assemblies(unittest.TestCase):
+    PARTS = ("parts:\n"
+             "  - {name: Slate frame, files: [frame.stl], printer: taz, profile: taz-workhorse-se/pla-0.10-fine, material: roll-4}\n"
+             "  - name: Door\n    printer: taz\n    profile: taz-workhorse-se/pla-0.10-fine\n"
+             "    variants:\n      - {name: fine, files: [door.stl]}\n")
+    GOOD = ("assemblies:\n"
+            "  - name: Slate v4\n"
+            "    description: |\n      The case on the base.\n"
+            "    items:\n"
+            "      - {part: slate FRAME, file: asm/frame.stl, explode: [0, 0, 1]}\n"
+            "      - {part: Door (fine), name: Front door, file: asm/door.stl, color: \"#AABBCC\"}\n"
+            "      - {name: Touch Display 2, file: asm/display.stl, color: \"#202226\", explode: [0, -1.5, 0]}\n")
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.cwd = os.getcwd()
+        import shutil
+        shutil.copytree(os.path.join(self.cwd, "testdata", "taz-workhorse-se"), os.path.join(self.dir, "profiles", "taz-workhorse-se"))
+        os.chdir(self.dir)
+        os.makedirs("asm")
+        for f in ("frame.stl", "door.stl"):
+            cube(f, 10)
+        cube("asm/frame.stl", 10)
+        cube("asm/door.stl", 4)
+        cube("asm/display.stl", 6)
+
+    def tearDown(self):
+        os.chdir(self.cwd)
+
+    def config(self, asm):
+        open("printdeck.yml", "w").write(self.PARTS + asm)
+        return pa.load_config("printdeck.yml")
+
+    def test_checks(self):
+        self.assertEqual(len(self.config(self.GOOD)["assemblies"]), 1)
+        item = "assemblies:\n  - name: S\n    items:\n      - {%s}\n"
+        bad = [item % "part: Nothing, file: asm/frame.stl",  # an unknown part
+               item % "part: Door, file: asm/door.stl",  # the part has variants: "Door (fine)"
+               item % "file: asm/display.stl",  # no part and no name
+               item % "name: D",  # no file
+               item % "name: D, file: ../x.stl",
+               item % "name: D, file: asm/display.stl, color: red",
+               item % "name: D, file: asm/display.stl, color: \"#12345\"",
+               item % "name: D, file: asm/display.stl, explode: [0, 0, 0]",
+               item % "name: D, file: asm/display.stl, explode: [0, 1]",
+               item % "name: D, file: asm/display.stl, explode: [0, x, 1]",
+               "assemblies:\n  - name: S\n    items: []\n",
+               "assemblies:\n  - {name: S, items: [" + ", ".join(["{name: D, file: asm/display.stl}"] * 61) + "]}\n",
+               "assemblies:\n" + "".join(f"  - {{name: S{n}, items: [{{name: D, file: asm/display.stl}}]}}\n" for n in range(11)),
+               "assemblies:\n  - {name: S, items: [{name: D, file: asm/display.stl}]}\n"
+               "  - {name: s, items: [{name: D, file: asm/display.stl}]}\n",
+               "assemblies:\n  - {items: [{name: D, file: asm/display.stl}]}\n"]
+        for text in bad:
+            with self.assertRaises(SystemExit, msg=text):
+                self.config(text)
+
+    def test_plan_assemblies(self):
+        cfg = self.config(self.GOOD)
+        models = {}
+        asms = pa.plan_assemblies(cfg, self.dir, models)
+        self.assertEqual(asms, [{"name": "Slate v4", "description": "The case on the base.", "items": [
+            {"name": "Slate frame", "part": "Slate frame", "model": "asm1-1.stl", "color": "#1a1a1a", "explode": [0.0, 0.0, 1.0]},
+            {"name": "Front door", "part": "Door (fine)", "model": "asm1-2.stl", "color": "#aabbcc"},
+            {"name": "Touch Display 2", "model": "asm1-3.stl", "color": "#202226", "explode": [0.0, -1.5, 0.0]}]}])
+        self.assertEqual(sorted(models), ["asm1-1.stl", "asm1-2.stl", "asm1-3.stl"])
+        # The model of an item keeps its place in the assembly.
+        self.assertEqual(pa.read_stl(models["asm1-3.stl"]), pa.read_stl("asm/display.stl"))
+
+    def test_missing_file(self):
+        cfg = self.config("assemblies:\n  - {name: S, items: [{name: D, file: asm/none.stl}]}\n")
+        with self.assertRaises(SystemExit):
+            pa.plan_assemblies(cfg, self.dir, {})
+
+    def test_no_digest_change(self):
+        a = self.config("")["entries"]
+        b = self.config(self.GOOD)["entries"]
+        self.assertEqual([pa.part_digest(p) for p in a], [pa.part_digest(p) for p in b])

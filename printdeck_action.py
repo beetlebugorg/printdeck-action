@@ -138,7 +138,19 @@ def upload(grant, name, data, ctype="application/octet-stream"):
 # printdeck.yml.
 
 # The fields that a variant of a part can change. settings adds to the settings of the part.
-VARIANT_FIELDS = ("files", "profile", "prebuilt", "material", "count", "alone", "printer", "process", "bed")
+VARIANT_FIELDS = ("files", "profile", "prebuilt", "material", "count", "alone", "printer", "process", "bed", "description")
+
+# The fields of a part for the Parts tab of the project page only: a change of them changes no
+# plate. description is a few sentences about the part, and group the heading of the part on the
+# tab, for example "The case".
+TEXT_FIELDS = ("description", "group")
+MAX_DESCRIPTION = 1000
+MAX_GROUP = 80
+
+
+def plate_fields(p):
+    """The entry of a part with no text fields: what makes its plate."""
+    return {k: v for k, v in p.items() if k not in TEXT_FIELDS}
 
 
 def expand(parts):
@@ -194,6 +206,9 @@ def load_config(path):
             inside(f, f"a file of {label(p)}")
         if p.get("prebuilt"):
             inside(p["prebuilt"], f"the prebuilt file of {label(p)}")
+        for k, most in (("description", MAX_DESCRIPTION), ("group", MAX_GROUP)):
+            if p.get(k) is not None and (not isinstance(p[k], str) or len(p[k].strip()) > most):
+                fail(f"{label(p)}: {k} is a text of at most {most} characters")
     docs = cfg.get("docs") or []
     if not isinstance(docs, list) or len(docs) > MAX_DOCS:
         fail(f"docs of {path} is a list of at most {MAX_DOCS} PDFs")
@@ -203,7 +218,67 @@ def load_config(path):
         inside(d["file"], f"the doc {d['name']}")
         if not str(d["file"]).lower().endswith(".pdf"):
             fail(f"the doc {d['name']} is not a PDF: {d['file']}")
+    check_assemblies(cfg, path)
     return cfg
+
+
+# The assemblies: models of the parts in their places, for the 3D view and the exploded view on
+# the Parts tab of the project page. They change no plate and no digest.
+MAX_ASSEMBLIES = 10
+MAX_ITEMS = 60
+MAX_NAME = 120
+COLOR = re.compile(r"#[0-9a-fA-F]{6}")
+
+
+def is_text(v, most):
+    return isinstance(v, str) and 0 < len(v.strip()) <= most
+
+
+def check_assemblies(cfg, path):
+    """Checks the assemblies of printdeck.yml. It sets "entry" of each item with a part to the
+    entry of that part."""
+    asms = cfg.get("assemblies")
+    if asms is None:
+        return
+    if not isinstance(asms, list) or len(asms) > MAX_ASSEMBLIES:
+        fail(f"assemblies of {path} is a list of at most {MAX_ASSEMBLIES} assemblies")
+    by_label = {label(e).lower(): e for e in cfg["entries"]}
+    names = set()
+    for a in asms:
+        if not isinstance(a, dict) or not is_text(a.get("name"), MAX_NAME):
+            fail(f"each assembly of {path} needs a name of at most {MAX_NAME} characters")
+        name = a["name"].strip()
+        if name.lower() in names:
+            fail(f"two assemblies have the name {name}")
+        names.add(name.lower())
+        if a.get("description") is not None and not (isinstance(a["description"], str) and len(a["description"].strip()) <= MAX_DESCRIPTION):
+            fail(f"the assembly {name}: description is a text of at most {MAX_DESCRIPTION} characters")
+        items = a.get("items")
+        if not isinstance(items, list) or not 1 <= len(items) <= MAX_ITEMS:
+            fail(f"the assembly {name}: items is a list of 1 to {MAX_ITEMS} items")
+        for j, it in enumerate(items):
+            where = f"the assembly {name}, item {j + 1}"
+            if not isinstance(it, dict):
+                fail(f"{where}: an item has a file, and a part or a name")
+            if it.get("part") is not None:
+                e = by_label.get(str(it["part"]).strip().lower())
+                if e is None:
+                    fail(f"{where}: no part {it['part']} in parts (use \"Name\" or \"Name (variant)\")")
+                it["entry"] = e
+            elif not is_text(it.get("name"), MAX_NAME):
+                fail(f"{where}: an item with no part needs a name of at most {MAX_NAME} characters")
+            if it.get("name") is not None and not is_text(it["name"], MAX_NAME):
+                fail(f"{where}: name is a text of at most {MAX_NAME} characters")
+            if not it.get("file"):
+                fail(f"{where}: an item needs a file")
+            inside(it["file"], f"the file of {where}")
+            if it.get("color") is not None and not (isinstance(it["color"], str) and COLOR.fullmatch(it["color"])):
+                fail(f"{where}: color is \"#rrggbb\": {it['color']}")
+            if it.get("explode") is not None:
+                v = it["explode"]
+                if (not isinstance(v, list) or len(v) != 3 or any(isinstance(x, bool) or not isinstance(x, (int, float)) for x in v)
+                        or not any(v)):
+                    fail(f"{where}: explode is 3 numbers, not all 0: {v}")
 
 
 # The docs: the PDFs of the project (a guide, a spec), for the project page.
@@ -417,7 +492,7 @@ def changed_parts(cfg, config_path, base, head):
                 why.append("its files")
             if p.get("profile") and any(d.startswith(prof) for d in diff):
                 why.append("its profile")
-            if was != p:
+            if plate_fields(was) != plate_fields(p):
                 why.append("its entry in " + config_path)
         if why:
             out[(p["name"], p["variant"])] = why
@@ -429,7 +504,7 @@ def part_digest(p):
     the content of its files (comparable), its prebuilt file, and the files of its profile. The
     service keeps a waiting plate when a newer plan has its parts with the same digests."""
     h = hashlib.sha256()
-    h.update(json.dumps({k: v for k, v in p.items() if k != "count"}, sort_keys=True, default=str).encode())
+    h.update(json.dumps({k: v for k, v in plate_fields(p).items() if k != "count"}, sort_keys=True, default=str).encode())
     for f in list(p["files"]) + ([p["prebuilt"]] if p.get("prebuilt") else []):
         data = open(f, "rb").read()
         h.update(f"\0{f}\0{len(data)}\0".encode())
@@ -463,9 +538,11 @@ def check_model_size(path):
             fail(f"{path} unpacks to over 400 MB")
 
 
-def model_stl(path, out):
+def model_stl(path, out, place=False):
     """Writes the model of a part file as an STL for the 3D view: an STL as it is, and the build
-    of a 3MF without its support blockers. It returns the size (X, Y, Z) in mm."""
+    of a 3MF without its support blockers. It returns the size (X, Y, Z) in mm. The model goes to
+    the center of the bed, on Z 0. With place, the model keeps its coordinates (an item of an
+    assembly)."""
     check_model_size(path)
     if path.lower().endswith(".3mf"):
         tris = []
@@ -478,7 +555,10 @@ def model_stl(path, out):
     if not tris:
         fail(f"{path}: no triangles")
     x0, x1, y0, y1, z0, z1 = curaslice.bounds(tris)
-    curaslice.write_stl(out, tris, -(x0 + x1) / 2, -(y0 + y1) / 2, -z0)
+    if place:
+        curaslice.write_stl(out, tris)
+    else:
+        curaslice.write_stl(out, tris, -(x0 + x1) / 2, -(y0 + y1) / 2, -z0)
     return x1 - x0, y1 - y0, z1 - z0
 
 
@@ -532,10 +612,42 @@ def bed_and_margin(part):
     return bed, curaslice.plate_margin(gs)
 
 
+def plan_assemblies(cfg, tmp, models):
+    """The entries of the assemblies for the manifest. It writes the model of each item to tmp
+    as asm{i}-{j}.stl, and adds it to models."""
+    out = []
+    for i, a in enumerate(cfg.get("assemblies") or []):
+        entry = {"name": a["name"].strip(), "items": []}
+        if (a.get("description") or "").strip():
+            entry["description"] = a["description"].strip()
+        for j, it in enumerate(a["items"]):
+            f = it["file"]
+            if not os.path.isfile(f):
+                fail(f"the assembly {entry['name']}, item {j + 1}: no file {f}")
+            name = f"asm{i + 1}-{j + 1}.stl"
+            model_stl(f, os.path.join(tmp, name), place=True)
+            models[name] = os.path.join(tmp, name)
+            e = it.get("entry")
+            item = {"name": (it.get("name") or "").strip() or label(e)}
+            if e is not None:
+                item["part"] = label(e)
+            item["model"] = name
+            color = it.get("color") or (material_info(e)[1] if e is not None else "")
+            if color:
+                item["color"] = color.lower()
+            if it.get("explode") is not None:
+                item["explode"] = [float(x) for x in it["explode"]]
+            entry["items"].append(item)
+        out.append(entry)
+        log(f"  {entry['name']}: {len(entry['items'])} items")
+    return out
+
+
 def plan(config_path):
     ev = event()
     cfg = load_config(config_path)
-    files = sorted({f for p in cfg["entries"] for f in p["files"]})
+    files = sorted({f for p in cfg["entries"] for f in p["files"]} |
+                   {it["file"] for a in cfg.get("assemblies") or [] for it in a["items"]})
     with group("Generate the model files"):
         generate(cfg, files)
     head = os.environ.get("GITHUB_SHA") or git("rev-parse", "HEAD").strip()
@@ -552,6 +664,9 @@ def plan(config_path):
         entry = {"name": p["name"], "variant": p["variant"], "files": list(p["files"]), "count": int(p.get("count", 1)), "printer": str(p["printer"]),
                  "process": process_of(p), "material": str(p.get("material", "")), "alone": bool(p.get("alone")),
                  "changed": (p["name"], p["variant"]) in changed, "models": []}
+        for k in TEXT_FIELDS:
+            if p.get(k):
+                entry[k] = " ".join(p[k].split()) if k == "group" else p[k].strip()
         if p.get("prebuilt"):
             entry["prebuilt"] = p["prebuilt"]
         else:
@@ -578,6 +693,9 @@ def plan(config_path):
     if cfg.get("docs"):
         with group("Read the docs"):
             manifest["docs"], doc_files = plan_docs(cfg, tmp)
+    if cfg.get("assemblies"):
+        with group("Read the assemblies"):
+            manifest["assemblies"] = plan_assemblies(cfg, tmp, models)
     reply = call("POST", "/plans", manifest)
     with group(f"Upload {len(models)} models"):
         for name, path in models.items():

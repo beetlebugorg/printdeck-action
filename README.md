@@ -129,6 +129,9 @@ parts:
     material: Grey resin
     prebuilt: phenom/resin_plate.cbddlp       # a ChiTuBox file in place of a slice
     alone: true                 # never shares a plate
+    group: The base             # optional: the heading of the part on the Parts tab
+    description: |              # optional: a few sentences about the part
+      The plate under the pod. Print it in grey resin.
 docs:                           # optional: the PDFs of the project, for the project page
   - name: Build guide
     file: bittle_pi_addon/bittle_pi_addon_guide.pdf
@@ -164,6 +167,33 @@ docs:                           # optional: the PDFs of the project, for the pro
   each PDF with a picture of its first page (`pdftoppm` of poppler-utils; the run installs it on
   GitHub when the runner has none). The project page shows the PDFs of the newest plan of the
   default branch, else of the newest plan of a tag, with a link to the file on GitHub.
+- `description` and `group`: the text of a part on the Parts tab of the project page.
+  `description` is at most 1000 characters, and a variant can change it. `group` is the heading of
+  the part on the tab, at most 80 characters, for example "The case". A change of these fields does not mark the part "Changed", and does not
+  change its digest.
+- `assemblies`: at most 10 assemblies, for the 3D view and the exploded view on the Parts tab.
+  An assembly has a `name` (at most 120 characters, unique), an optional `description` and 1 to
+  60 `items`. Each item has a `file`: an STL or 3MF of the model in its place in the assembly, in
+  mm with Z up. The plan run uploads each model with its coordinates. An item has a `part` (the
+  name of a part of `parts`, with its variant: "Door (fine)"), or a `name` for a model with no
+  part, for example a bought display. An item of a part has the name and the material color of
+  the part, and `name` and `color` can change them. `color` is "#rrggbb". `explode` is the
+  direction of the item in the exploded view: 3 numbers, not all 0. The assemblies change no
+  plate and no digest.
+
+  ```yaml
+  assemblies:
+    - name: Slate v4
+      description: The case on the base.
+      items:
+        - part: Slate frame
+          file: lulzbot/stl/slate/assembly/frame.stl
+          explode: [0, 0, 1]
+        - name: Touch Display 2
+          file: lulzbot/stl/slate/assembly/display.stl
+          color: "#202226"
+          explode: [0, -1, 0]
+  ```
 
 ## The profiles
 
