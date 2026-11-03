@@ -24,7 +24,7 @@ jobs:
         run: |
           export CURAENGINE="$HOME/.cache/printdeck-curaengine-5.13.0/CuraEngine"
           export CURAENGINE_LIB="$HOME/.cache/printdeck-curaengine-5.13.0"
-          python3 -m unittest -v test_curaslice test_action
+          python3 -m unittest -v test_curaslice test_action test_gcodemodel
 
   resin:
     runs-on: ubuntu-24.04

@@ -5,8 +5,9 @@
     printdeck_action.py slice --build <id> [--config printdeck.yml]
 
 plan (at a push, a pull request or a tag): reads printdeck.yml, runs its generate step and checks
-the files, finds the parts that changed, and sends the plan with the models of the parts. The
-owner then chooses the parts and the plates on the plan page.
+the files, finds the parts that changed, slices each part alone, and sends the plan with the
+models and the G-code of the parts. The owner then chooses the parts and the plates on the plan
+page.
 
 slice (workflow_dispatch with the build): gets the plates of the build, slices each plate with
 curaslice.py and the profiles of the repository, and sends the files.
@@ -19,6 +20,7 @@ https://github.com/beetlebugorg/printdeck/blob/main/docs/specs/github-builds.md.
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -39,6 +41,7 @@ except ImportError:  # the mode processes reads no YAML, and runs before the ins
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import curaslice  # noqa: E402
+import gcodemodel  # noqa: E402
 import resinslice  # noqa: E402
 
 API = os.environ.get("PRINTDECK_API", "https://printdeck.beetlebug.org").rstrip("/")
@@ -387,6 +390,13 @@ def check_assemblies(cfg, path):
             inside(it["file"], f"the file of {where}")
             if it.get("color") is not None and not (isinstance(it["color"], str) and COLOR.fullmatch(it["color"])):
                 fail(f"{where}: color is \"#rrggbb\": {it['color']}")
+            if it.get("transform") is not None:
+                v = it["transform"]
+                if (not isinstance(v, list) or len(v) != 12 or any(isinstance(x, bool) or not isinstance(x, (int, float)) for x in v)
+                        or not all(math.isfinite(x) and abs(x) < 1e6 for x in v)):
+                    fail(f"{where}: transform is 12 numbers, as in a 3MF file: {v}")
+                if it.get("part") is None:
+                    fail(f"{where}: transform is for an item of a part")
             if it.get("explode") is not None:
                 v = it["explode"]
                 if (not isinstance(v, list) or len(v) != 3 or any(isinstance(x, bool) or not isinstance(x, (int, float)) for x in v)
@@ -796,9 +806,14 @@ def plan_assemblies(cfg, tmp, models):
             if not os.path.isfile(f):
                 fail(f"the assembly {entry['name']}, item {j + 1}: no file {f}")
             name = f"asm{i + 1}-{j + 1}.stl"
-            model_stl(f, os.path.join(tmp, name), place=True)
-            models[name] = os.path.join(tmp, name)
             e = it.get("entry")
+            if e is not None and e.get("gcode_model") and it.get("transform"):
+                # The G-code model is in the coordinates of the part file. The transform puts it
+                # in its place in the assembly.
+                gcodemodel.transformed(e["gcode_model"], os.path.join(tmp, name), [float(x) for x in it["transform"]])
+            else:
+                model_stl(f, os.path.join(tmp, name), place=True)
+            models[name] = os.path.join(tmp, name)
             item = {"name": (it.get("name") or "").strip() or label(e)}
             if e is not None:
                 item["part"] = label(e)
@@ -812,6 +827,129 @@ def plan_assemblies(cfg, tmp, models):
         out.append(entry)
         log(f"  {entry['name']}: {len(entry['items'])} items")
     return out
+
+
+# The slice of each part in the plan run.
+
+# The folder of the slices of the parts, named by the digest of the part. action.yml keeps it in
+# the cache of GitHub Actions, so a part that did not change is not sliced again.
+PART_CACHE = os.environ.get("PRINTDECK_PART_CACHE") or os.path.expanduser("~/.cache/printdeck-parts")
+MAX_SLICE_ERROR = 1000
+FACT_KEYS = ("seconds", "grams", "ml", "layers", "layer_height", "slicer", "profile", "places", "centre", "scale", "line_width")
+
+
+def slug(text):
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:40] or "part"
+
+
+def slice_part(cfg, p, i, commit, tmp):
+    """Slices the part p alone, with a count of 1, or gets its slice from PART_CACHE. It returns
+    (the name of the file for the upload, its path, the facts). A part with a prebuilt file has no
+    slice: it returns None."""
+    if p.get("prebuilt"):
+        return None
+    resin = process_of(p) == "resin"
+    ext = ".cbddlp" if resin else ".gcode"
+    name = f"part{i + 1}{ext}"
+    digest = part_digest(p)
+    cached, meta = os.path.join(PART_CACHE, digest + ext), os.path.join(PART_CACHE, digest + ".json")
+    if os.path.isfile(cached) and os.path.isfile(meta):
+        try:
+            facts = json.load(open(meta))
+            out = os.path.join(tmp, name)
+            shutil.copyfile(cached, out)
+            log(f"  {label(p)}: the slice of the cache ({clock(int(facts.get('seconds', 0)))})")
+            return name, out, facts
+        except (OSError, ValueError):
+            pass
+    path, quality = profile_of(p)
+    out = os.path.join(tmp, name)
+    t0 = __import__("time").time()
+    for f in p["files"]:
+        check_model_size(f)
+    if resin:
+        resin_profile(p)
+        work = tempfile.mkdtemp(prefix=f"part-{i + 1}-", dir=tmp)
+        facts = resinslice.slice_plate(path, quality, [(label(p), p["files"], 1, p.get("settings") or {})], out, work, log=log)
+        facts = {"seconds": int(facts["seconds"]), "ml": facts["ml"], "grams": facts["grams"], "layers": int(facts["layers"]),
+                 "layer_height": facts["layer_height"], "slicer": os.environ.get("PRUSASLICER_NAME", "PrusaSlicer"),
+                 "profile": f"{os.path.basename(path)}/{quality}@{curaslice.profile_version(path)}"}
+    else:
+        meta_lines = [f";Printdeck title: {label(p)}", f";Printdeck commit: {commit}"]
+        facts = curaslice.slice_plate(path, quality, p.get("material"), [(label(p), p["files"], 1, p.get("settings") or {})], out,
+                                      name=f"{cfg.get('project', 'printdeck')}-{slug(label(p))}", meta=meta_lines)
+        for w in curaslice.LAST_WARNINGS:
+            print(f"::warning title=CuraEngine, {command_data(label(p))}::{command_data(w)}", flush=True)
+        facts = {k: facts[k] for k in FACT_KEYS if k in facts}
+        facts.update({"seconds": int(facts.get("seconds", 0)), "layers": int(facts.get("layers", 0)), "slicer": "CuraEngine 5.13.0"})
+    log(f"  {label(p)}: sliced in {__import__('time').time() - t0:.1f} s ({clock(int(facts.get('seconds', 0)))})")
+    try:
+        os.makedirs(PART_CACHE, exist_ok=True)
+        shutil.copyfile(out, cached)
+        json.dump(facts, open(meta, "w"))
+    except OSError as e:
+        log(f"  the cache of the slices: {e}")
+    return name, out, facts
+
+
+def prune_cache(digests):
+    """Removes the slices of PART_CACHE that no part of this plan has."""
+    if not os.path.isdir(PART_CACHE):
+        return
+    for n in os.listdir(PART_CACHE):
+        if n.split(".", 1)[0] not in digests:
+            try:
+                os.remove(os.path.join(PART_CACHE, n))
+            except OSError:
+                pass
+
+
+def gcode_model(p, gcode, facts, out):
+    """Writes the G-code model of p to out, in the coordinates of its file. It returns False for a
+    part that needs no G-code model: one that is no single 3MF file with a slicer-made mesh."""
+    if len(p["files"]) != 1 or not gcodemodel.needs_model(p["files"][0]) or len(facts.get("places") or []) != 1:
+        return False
+    place = dict(facts["places"][0], centre=facts["centre"], scale=facts["scale"])
+    gcodemodel.gcode_stl(gcode, out, place, float(facts.get("line_width") or 0.4))
+    check_model_size(out)
+    return True
+
+
+def slice_one(cfg, p, i, head, tmp, entry, models):
+    """Slices the part p for the plan, and adds the facts, the file and the G-code model to entry
+    and models. A part that does not slice gets slice_error."""
+    try:
+        got = slice_part(cfg, p, i, head, tmp)
+    except (SystemExit, curaslice.ProfileError, resinslice.ProfileError, Exception) as e:  # noqa: BLE001
+        # The text of an error of this Action, or of the slicer. Any other error has only its
+        # class, as failure_text gives it.
+        ours = isinstance(e, (SystemExit, curaslice.ProfileError, resinslice.ProfileError))
+        text = (" ".join(str(e).split()) if ours else f"the slice failed: {type(e).__name__}")[:MAX_SLICE_ERROR] or "the slicer failed"
+        entry["slice_error"] = text
+        print(f"::error title=Printdeck slice, {command_data(label(p))}::{command_data(text)}", flush=True)
+        return
+    if got is None:
+        return
+    name, path, facts = got
+    data = open(path, "rb").read()
+    entry.update({k: facts[k] for k in ("seconds", "grams", "ml", "layers", "layer_height", "slicer") if k in facts})
+    entry.update({"slice_file": name, "slice_size": len(data), "slice_sha256": hashlib.sha256(data).hexdigest()})
+    models[name] = path
+    if name.endswith(".gcode"):
+        local = os.path.join(tmp, f"part{i + 1}-gcode.stl")
+        try:
+            made = gcode_model(p, path, facts, local)
+        except SystemExit as e:
+            log(f"  {label(p)}: no G-code model: {e}")
+            made = False
+        if made:
+            p["gcode_model"] = local
+            # The part view: the model goes to the middle of the bed on Z 0, as model_stl puts it.
+            tris = [t for item in curaslice.read_3mf(p["files"][0]) for m in item for t in m["triangles"]]
+            x0, x1, y0, y1, z0, _ = curaslice.bounds(tris)
+            view = os.path.join(tmp, entry["models"][0])
+            gcodemodel.transformed(local, view, [1, 0, 0, 0, 1, 0, 0, 0, 1, -(x0 + x1) / 2, -(y0 + y1) / 2, -z0])
+            log(f"  {label(p)}: the 3D model is from the G-code")
 
 
 def plan(config_path):
@@ -860,6 +998,8 @@ def plan(config_path):
             entry["material_url"] = links[0]["url"]
             entry["material_links"] = links
         entry["digest"] = part_digest(p)
+        if not os.environ.get("PRINTDECK_SKIP_SLICE"):  # the switch is for a test on a computer
+            slice_one(cfg, p, i, head, tmp, entry, models)
         (bx, by), margin = bed_and_margin(p)
         entry.update({"size_x": round(sx, 2), "size_y": round(sy, 2), "size_z": round(sz, 2), "bed_x": bx, "bed_y": by,
                       "margin": round(margin, 2)})
@@ -879,7 +1019,8 @@ def plan(config_path):
     reply = call("POST", "/plans", manifest)
     with group(f"Upload {len(models)} models"):
         for name, path in models.items():
-            upload(reply["grant"], name, open(path, "rb").read(), "model/stl")
+            ctype = {".gcode": "text/x-gcode", ".cbddlp": "application/octet-stream"}.get(os.path.splitext(name)[1], "model/stl")
+            upload(reply["grant"], name, open(path, "rb").read(), ctype)
             log(f"  {name}: {os.path.getsize(path) // 1024} KB")
     if doc_files:
         with group(f"Upload {len(manifest['docs'])} PDFs"):
@@ -890,6 +1031,8 @@ def plan(config_path):
         upload(reply["grant"], cover, open(cover_file[0], "rb").read(), cover_file[1])
     call("POST", f"/plans/{reply['id']}/done")
     log(f"The plan: {reply['url']}")
+    if not os.environ.get("PRINTDECK_SKIP_SLICE"):
+        prune_cache({e["digest"] for e in manifest["parts"]})
     print(f"::notice title=Printdeck plan::{len(changed)} of {len(cfg['entries'])} parts changed. Choose the parts: {reply['url']}",
           flush=True)
     rows = []
@@ -898,11 +1041,16 @@ def plan(config_path):
         rows.append([e["name"], e["variant"] or "-", e.get("printer", ""),
                      e.get("profile", "").partition("@")[0].rpartition("/")[2] or ("ready file" if e.get("prebuilt") else "-"),
                      e.get("material_name") or e.get("material") or "-", f"{e['size_x']:.0f} x {e['size_y']:.0f} x {e['size_z']:.0f} mm",
+                     clock(e["seconds"]) if e.get("seconds") else ("does not slice" if e.get("slice_error") else "-"),
+                     (f"{e['ml']} ml" if e.get("ml") else f"{e['grams']} g") if e.get("grams") or e.get("ml") else "-",
                      ("yes: " + ", ".join(why)) if why else "no"])
     against = f"`{base[:7]}`" if base else "nothing (a tag, or the first push)"
     summary(f"## Printdeck plan\n\n**[Choose the parts and the plates]({reply['url']})**\n\n"
             f"{len(changed)} of {len(cfg['entries'])} parts changed, compared with {against}.\n\n" +
-            table(["Part", "Variant", "Printer", "Profile", "Material", "Size", "Changed"], rows))
+            table(["Part", "Variant", "Printer", "Profile", "Material", "Size", "Print time", "Filament", "Changed"], rows))
+    bad = [e["name"] for e in manifest["parts"] if e.get("slice_error")]
+    if bad:
+        fail(f"{len(bad)} parts do not slice: {', '.join(bad)}. See the errors above.")
 
 
 def summary(text):
@@ -1009,7 +1157,10 @@ def do_slice(config_path, job):
     tmp = tempfile.mkdtemp(prefix="printdeck-slice-")
     out = []
     total = len(job["plates"])
-    for n, plate in enumerate(job["plates"], 1):
+    for i, plate in enumerate(job["plates"], 1):
+        # The service leaves out a plate that has the G-code of the plan. "number" is the number
+        # of the plate in the build, so the file names stay the same.
+        n = int(plate.get("number") or i)
         parts = []
         for pp in plate["parts"]:
             p = by_name.get((pp["name"].lower(), str(pp.get("variant") or "").lower()))
@@ -1027,7 +1178,7 @@ def do_slice(config_path, job):
         entry = {"printer": plate["printer"], "process": plate["process"], "parts": plate["parts"],
                  "material_name": plate.get("material_name", ""), "material": plate.get("material", "")}
         title = " + ".join(label(p) + (f" x{c}" if c > 1 else "") for p, c in parts)
-        progress(job["id"], f"Slicing plate {n} of {total}: {title}", PHASE_SLICE, n)
+        progress(job["id"], f"Slicing plate {i} of {total}: {title}", PHASE_SLICE, n)
         paths = {}
         if first.get("prebuilt"):
             src = first["prebuilt"]
@@ -1097,6 +1248,14 @@ def main():
     a = ap.parse_args()
     if a.mode == "plan":
         plan(a.config)
+    elif a.mode == "processes" and not a.build:
+        # For the steps of action.yml in the plan run: the slicers that the parts need.
+        cfg = load_config(a.config)
+        procs = {process_of(p) for p in cfg["entries"] if not p.get("prebuilt")}
+        with open(os.environ.get("GITHUB_OUTPUT", os.devnull), "a") as f:
+            for k in ("fdm", "resin"):
+                f.write(f"{k}={'true' if k in procs else 'false'}\n")
+        log(f"The parts need: {', '.join(sorted(procs)) or 'no slicer'}")
     elif a.mode == "processes":
         # For the steps of action.yml: the slicers that the plates of the build need.
         if not re.fullmatch(r"[a-z0-9]{1,40}", a.build):

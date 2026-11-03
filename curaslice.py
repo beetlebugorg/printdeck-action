@@ -747,7 +747,12 @@ def objects_of(files, tmp):
                 write_stl(p, m["triangles"], dx, dy, dz)
                 meshes.append((p, m["settings"]))
             out.append((meshes, (x1 - x0, y1 - y0)))
+            GROUP_SHIFT[id(meshes)] = (dx, dy, dz)
     return out
+
+
+# The shift that objects_of gives to the meshes of each group, by id() of its list of meshes.
+GROUP_SHIFT = {}
 
 
 def stl_size(path):
@@ -807,9 +812,44 @@ def profile_version(profile_dir):
     return h.hexdigest()[:12]
 
 
-def slice_files(meshes, gs, es, out, defs_dir, count=1, lines=()):
+def mesh_resolver(profile_dir, quality, material, plate, gs, es):
+    """A function that gives the CuraEngine settings of one mesh from its own settings, as the
+    Cura app gives them: the mesh settings on top of the stack, with each formula worked out. It
+    returns each setting of the mesh, and each other per-mesh setting whose value changes, for
+    example infill_line_distance for another infill_sparse_density. A value can be a formula
+    ("=0", as the Cura app writes a 3MF file)."""
+    cache = {}
+
+    def resolve(mine):
+        if not mine:
+            return {}
+        key = json.dumps(mine, sort_keys=True, default=str)
+        if key in cache:
+            return cache[key]
+        glob, ext, _, _ = build(profile_dir, quality, material, {**plate, **mine})
+        out = {}
+        for k, d in ext.defs.items():
+            if d.get("type") == "category" or not (k in mine or d.get("settable_per_mesh")):
+                continue
+            try:
+                v = ext.get(k)
+            except (ValueError, KeyError):
+                if k in mine:
+                    raise ProfileError(f"the setting {k} = {mine[k]!r} has no value")
+                continue
+            base = es.get(k, gs.get(k))
+            if k in mine or engine_text(v) != engine_text(base):
+                out[k] = v
+        cache[key] = out
+        return out
+
+    return resolve
+
+
+def slice_files(meshes, gs, es, out, defs_dir, count=1, lines=(), resolve=None):
     """Slices the files meshes (paths, or (path, settings) pairs: the per-mesh settings of a part)
-    with the settings gs and es into out."""
+    with the settings gs and es into out. resolve (mesh_resolver) gives the CuraEngine settings of
+    a mesh from its own settings. With no resolve, the settings go to CuraEngine as they are."""
     args = engine_command() + ["slice", "-v", "-j", os.path.join(defs_dir, "fdmprinter.def.json")]
     # A setting with no value does not go to CuraEngine, as in the Cura app.
     for k, v in gs.items():
@@ -829,20 +869,26 @@ def slice_files(meshes, gs, es, out, defs_dir, count=1, lines=()):
         for obj in objects_of([path], tmp):
             objs += [(obj, extra)] * count
     places = layout([o for o, _ in objs], gs)
+    global LAST_PLACES
+    LAST_PLACES = []
     for ((obj, size), (x, y)), (_, extra) in zip(places, objs):
-        mine = [f"{k}={engine_text(v)}" for k, v in extra.items()]
+        if size is not None:
+            LAST_PLACES.append({"shift": GROUP_SHIFT.get(id(obj), (0.0, 0.0, 0.0)), "position": (x, y)})
         if size is None:
             args += ["-l", os.path.abspath(obj), "-s", "extruder_nr=0", "-s", "center_object=True",
                      "-s", f"mesh_position_x={x:.3f}", "-s", f"mesh_position_y={y:.3f}"]
-            for kv in mine:
-                args += ["-s", kv]
+            for k, v in (resolve(extra) if resolve else extra).items():
+                args += ["-s", f"{k}={engine_text(v)}"]
             continue
         for path, settings in obj:
             args += ["-l", path, "-s", "extruder_nr=0", "-s", f"mesh_position_x={x:.3f}", "-s", f"mesh_position_y={y:.3f}"]
-            for kv in mine:
-                args += ["-s", kv]
-            for k, v in settings.items():
-                args += ["-s", f"{k}={v}"]
+            # The settings of the mesh in its 3MF file are on top of the settings of the part.
+            if resolve:
+                mesh = resolve({**extra, **settings})
+            else:
+                mesh = {**{k: engine_text(v) for k, v in extra.items()}, **settings}
+            for k, v in mesh.items():
+                args += ["-s", f"{k}={engine_text(v)}"]
     args += ["-o", out]
     # The arguments can pass the limit of a command line: write them to a file of arguments.
     env = dict(os.environ, CURA_ENGINE_SEARCH_PATH=defs_dir)
@@ -856,6 +902,9 @@ def slice_files(meshes, gs, es, out, defs_dir, count=1, lines=()):
 
 # LAST_WARNINGS are the warnings of CuraEngine at the last slice, for the log of the Action.
 LAST_WARNINGS = []
+# LAST_PLACES has an entry for each 3MF group of the last slice: the shift of objects_of and the
+# mesh position on the bed. gcodemodel uses them to put G-code back in the coordinates of the file.
+LAST_PLACES = []
 
 
 def engine_warnings(log):
@@ -913,12 +962,19 @@ def slice_plate(profile_dir, quality, material, parts, out, name="plate", meta=(
     for (pname, files, count, _), mine in zip(parts, per):
         for f in files:
             meshes += [(f, mine)] * max(1, count)
-    slice_files(meshes, gs, es, out, definitions_dir(profile_dir), 1, lines)
+    resolve = mesh_resolver(profile_dir, quality, material, plate, gs, es)
+    slice_files(meshes, gs, es, out, definitions_dir(profile_dir), 1, lines, resolve)
     f = facts(out)
     if "metres" in f:
         r = float(es.get("material_diameter") or gs.get("material_diameter") or 2.85) / 2
         f["grams"] = round(math.pi * r * r * f["metres"] * 1000 * 1.24 / 1000, 1)
     f["profile"] = profile
+    f["places"] = [dict(p) for p in LAST_PLACES]
+    f["centre"] = (0.0, 0.0) if str(gs.get("machine_center_is_zero")).lower() == "true" else \
+        (float(gs.get("machine_width")) / 2, float(gs.get("machine_depth")) / 2)
+    f["scale"] = (float(es.get("material_shrinkage_percentage_xy") or gs.get("material_shrinkage_percentage_xy") or 100) / 100,
+                  float(es.get("material_shrinkage_percentage_z") or gs.get("material_shrinkage_percentage_z") or 100) / 100)
+    f["line_width"] = float(es.get("line_width") or gs.get("line_width") or 0.4)
     return f
 
 
