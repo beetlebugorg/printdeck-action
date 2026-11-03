@@ -5,9 +5,10 @@ A GitHub Action that sends the printed parts of a repository to
 the repository.
 
 1. **plan**, at each push, pull request and tag: reads `printdeck.yml`, runs its generate step,
-   finds the parts that changed, and sends the plan with a model of each part. The owner opens
-   the plan page, chooses the parts (the parts that changed are checked at first), and puts them
-   on plates.
+   finds the parts that changed, slices each part alone, and sends the plan with a model, the
+   G-code and the print time of each part. A part that does not slice fails the run. The owner
+   opens the plan page, chooses the parts (the parts that changed are checked at first), and puts
+   them on plates. A plate with one part and a count of 1 gets the G-code of the plan.
 2. **slice**, when the owner taps Slice: Printdeck starts the workflow with the ID of the build.
    The Action slices each plate with CuraEngine 5.13 and sends the G-code. The owner checks each
    plate on the build page and approves it. A deck prints a plate only after a person presses
@@ -173,7 +174,14 @@ docs:                           # optional: the PDFs of the project, for the pro
   ```
 - `prebuilt`: a `.cbddlp`, `.ctb` or G-code (`.gcode`, `.gco`, `.g`) file, at most 200 MB.
 - `files`: STL or 3MF. A 3MF file keeps the Cura settings of its objects, for example a support
-  blocker (`cura:anti_overhang_mesh`).
+  blocker (`cura:anti_overhang_mesh`). CuraEngine reads each value as it is: write `0` and
+  `True`, and write the values that Cura calculates (for example `infill_line_distance` for
+  another `infill_sparse_density`). Put the objects of one part in one group (one build item):
+  the Action puts each build item at its own place on the plate.
+- The 3D model of a part is its file. A 3MF part with an infill mesh, a cutting mesh or a support
+  mesh (`cura:infill_mesh` and so on) prints a pattern that its mesh does not show. For such a
+  part with one file, the 3D model is made from the G-code of the plan: each printed line is a
+  box of the line width by the layer height.
 - `settings`: Cura settings of the part. A setting that Cura allows for each mesh (for example
   `support_enable`) stays with its part on a shared plate. Another setting (for example
   `adhesion_type` or `brim_line_count`) is for the whole plate: two parts with other values of
@@ -210,6 +218,9 @@ docs:                           # optional: the PDFs of the project, for the pro
   it tries the same direction turned up. Items next to each other with the same `explode` move
   together, for example the inserts of a part. Give each kind of screw its own file and its own
   direction along its axis. The assemblies change no plate and no digest.
+  `transform` (an item of a part, optional): 12 numbers, as in a 3MF file, from the coordinates
+  of the part file to the assembly. When the part has a 3D model from its G-code, the item shows
+  that model with the transform, in place of its `file`.
 
   ```yaml
   assemblies:
@@ -238,13 +249,17 @@ and the build, the commit and the title.
 
 `curaengine.sh` takes CuraEngine 5.13.0 and its libraries from the official AppImage of Cura
 5.13.0, after a check of its SHA-256. The Action keeps them in the cache of GitHub Actions, so
-only the first slice run downloads the AppImage.
+only the first run downloads the AppImage.
+
+The plan run keeps the slice of each part in the cache of GitHub Actions
+(`~/.cache/printdeck-parts`), by the digest of the part. A part that did not change is not sliced
+again.
 
 ## Tests
 
 ```
-python3 -m unittest test_curaslice test_action
-CURAENGINE=/path/to/CuraEngine CURAENGINE_LIB=/path/to/libs python3 -m unittest test_curaslice   # with a real slice
+python3 -m unittest test_curaslice test_action test_gcodemodel
+CURAENGINE=/path/to/CuraEngine CURAENGINE_LIB=/path/to/libs python3 -m unittest test_curaslice test_gcodemodel   # with a real slice
 ```
 
 ## License

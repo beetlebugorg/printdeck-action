@@ -747,7 +747,12 @@ def objects_of(files, tmp):
                 write_stl(p, m["triangles"], dx, dy, dz)
                 meshes.append((p, m["settings"]))
             out.append((meshes, (x1 - x0, y1 - y0)))
+            GROUP_SHIFT[id(meshes)] = (dx, dy, dz)
     return out
+
+
+# The shift that objects_of gives to the meshes of each group, by id() of its list of meshes.
+GROUP_SHIFT = {}
 
 
 def stl_size(path):
@@ -829,7 +834,11 @@ def slice_files(meshes, gs, es, out, defs_dir, count=1, lines=()):
         for obj in objects_of([path], tmp):
             objs += [(obj, extra)] * count
     places = layout([o for o, _ in objs], gs)
+    global LAST_PLACES
+    LAST_PLACES = []
     for ((obj, size), (x, y)), (_, extra) in zip(places, objs):
+        if size is not None:
+            LAST_PLACES.append({"shift": GROUP_SHIFT.get(id(obj), (0.0, 0.0, 0.0)), "position": (x, y)})
         mine = [f"{k}={engine_text(v)}" for k, v in extra.items()]
         if size is None:
             args += ["-l", os.path.abspath(obj), "-s", "extruder_nr=0", "-s", "center_object=True",
@@ -856,6 +865,9 @@ def slice_files(meshes, gs, es, out, defs_dir, count=1, lines=()):
 
 # LAST_WARNINGS are the warnings of CuraEngine at the last slice, for the log of the Action.
 LAST_WARNINGS = []
+# LAST_PLACES has an entry for each 3MF group of the last slice: the shift of objects_of and the
+# mesh position on the bed. gcodemodel uses them to put G-code back in the coordinates of the file.
+LAST_PLACES = []
 
 
 def engine_warnings(log):
@@ -919,6 +931,12 @@ def slice_plate(profile_dir, quality, material, parts, out, name="plate", meta=(
         r = float(es.get("material_diameter") or gs.get("material_diameter") or 2.85) / 2
         f["grams"] = round(math.pi * r * r * f["metres"] * 1000 * 1.24 / 1000, 1)
     f["profile"] = profile
+    f["places"] = [dict(p) for p in LAST_PLACES]
+    f["centre"] = (0.0, 0.0) if str(gs.get("machine_center_is_zero")).lower() == "true" else \
+        (float(gs.get("machine_width")) / 2, float(gs.get("machine_depth")) / 2)
+    f["scale"] = (float(es.get("material_shrinkage_percentage_xy") or gs.get("material_shrinkage_percentage_xy") or 100) / 100,
+                  float(es.get("material_shrinkage_percentage_z") or gs.get("material_shrinkage_percentage_z") or 100) / 100)
+    f["line_width"] = float(es.get("line_width") or gs.get("line_width") or 0.4)
     return f
 
 

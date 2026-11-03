@@ -43,27 +43,46 @@ runs:
         cd "$GITHUB_ACTION_PATH"
         python3 -I -c "import yaml" 2>/dev/null || python3 -I -m pip install --quiet --disable-pip-version-check "pyyaml>=6,<7"
 
+    # The plan run slices each part: the slicers that the parts of printdeck.yml need.
+    - name: Read the parts of printdeck.yml
+      id: parts
+      if: inputs.mode == 'plan'
+      shell: bash
+      env:
+        PRINTDECK_CONFIG: ${{ inputs.config }}
+      run: python3 -I "$GITHUB_ACTION_PATH/printdeck_action.py" processes --config "$PRINTDECK_CONFIG"
+
+    # The slices of the parts of the last plan, by the digest of each part. A part that did not
+    # change is not sliced again.
+    - name: Cache the slices of the parts
+      if: inputs.mode == 'plan'
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/printdeck-parts
+        key: printdeck-parts-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: printdeck-parts-
+
     - name: Cache PrusaSlicer 2.8.1
-      if: steps.plates.outputs.resin == 'true'
+      if: steps.plates.outputs.resin == 'true' || steps.parts.outputs.resin == 'true'
       uses: actions/cache@v4
       with:
         path: ~/.cache/printdeck-prusaslicer-2.8.1
         key: printdeck-prusaslicer-2.8.1-linux-x64
 
     - name: Get PrusaSlicer 2.8.1 (the AppImage, checked by SHA-256)
-      if: steps.plates.outputs.resin == 'true'
+      if: steps.plates.outputs.resin == 'true' || steps.parts.outputs.resin == 'true'
       shell: bash
       run: bash "$GITHUB_ACTION_PATH/prusaslicer.sh" "$HOME/.cache/printdeck-prusaslicer-2.8.1"
 
     - name: Cache CuraEngine 5.13
-      if: inputs.mode == 'slice' && steps.plates.outputs.fdm == 'true'
+      if: steps.plates.outputs.fdm == 'true' || steps.parts.outputs.fdm == 'true'
       uses: actions/cache@v4
       with:
         path: ~/.cache/printdeck-curaengine-5.13.0
         key: printdeck-curaengine-5.13.0-linux-x64
 
     - name: Get CuraEngine 5.13 (from the Cura AppImage, checked by SHA-256)
-      if: inputs.mode == 'slice' && steps.plates.outputs.fdm == 'true'
+      if: steps.plates.outputs.fdm == 'true' || steps.parts.outputs.fdm == 'true'
       shell: bash
       run: bash "$GITHUB_ACTION_PATH/curaengine.sh" "$HOME/.cache/printdeck-curaengine-5.13.0"
 

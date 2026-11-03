@@ -419,6 +419,29 @@ class Assemblies(unittest.TestCase):
         # The model of an item keeps its place in the assembly.
         self.assertEqual(pa.read_stl(models["asm1-3.stl"]), pa.read_stl("asm/display.stl"))
 
+    def test_transform_checks(self):
+        item = "assemblies:\n  - name: S\n    items:\n      - {%s}\n"
+        ok = self.config(item % "part: slate frame, file: asm/frame.stl, transform: [1, 0, 0, 0, 1, 0, 0, 0, 1, 5, 0, 2.5]")
+        self.assertEqual(len(ok["assemblies"][0]["items"][0]["transform"]), 12)
+        for bad in ("part: slate frame, file: asm/frame.stl, transform: [1, 0, 0]",
+                    "part: slate frame, file: asm/frame.stl, transform: [1, 0, 0, 0, 1, 0, 0, 0, 1, 5, 0, x]",
+                    "part: slate frame, file: asm/frame.stl, transform: [1, 0, 0, 0, 1, 0, 0, 0, 1, 5, 0, .inf]",
+                    "name: D, file: asm/display.stl, transform: [1, 0, 0, 0, 1, 0, 0, 0, 1, 5, 0, 2]"):  # no part
+            with self.assertRaises(SystemExit, msg=bad):
+                self.config(item % bad)
+
+    def test_gcode_model_in_place(self):
+        cfg = self.config("assemblies:\n  - name: S\n    items:\n"
+                          "      - {part: slate frame, file: asm/frame.stl, transform: [1, 0, 0, 0, 1, 0, 0, 0, 1, 100, 0, 0]}\n"
+                          "      - {part: door (fine), file: asm/door.stl, transform: [1, 0, 0, 0, 1, 0, 0, 0, 1, 100, 0, 0]}\n")
+        # The frame has a G-code model; the door has none, so its item keeps its file.
+        cfg["entries"][0]["gcode_model"] = "frame.stl"
+        models = {}
+        pa.plan_assemblies(cfg, self.dir, models)
+        moved = [tuple((x + 100, y, z) for x, y, z in t) for t in pa.read_stl("frame.stl")]
+        self.assertEqual(pa.read_stl(models["asm1-1.stl"]), moved)
+        self.assertEqual(pa.read_stl(models["asm1-2.stl"]), pa.read_stl("asm/door.stl"))
+
     def test_missing_file(self):
         cfg = self.config("assemblies:\n  - {name: S, items: [{name: D, file: asm/none.stl}]}\n")
         with self.assertRaises(SystemExit):
@@ -585,3 +608,36 @@ class SliceModelSize(InRepo):
             with self.assertRaises(SystemExit):
                 pa.do_slice("printdeck.yml", job)
         self.assertEqual(sliced, [])
+
+
+class PartSlice(InRepo):
+    PARTS = "parts:\n  - {name: A, files: [a.stl], printer: taz, profile: taz-workhorse-se/pla-0.10-fine}\n"
+
+    def test_slice_error(self):
+        cfg = self.config(self.PARTS)
+        entry, models = {}, {}
+        with unittest.mock.patch.object(pa, "slice_part", side_effect=SystemExit("CuraEngine failed:\nbad value")):
+            pa.slice_one(cfg, cfg["entries"][0], 0, "c" * 40, self.dir, entry, models)
+        self.assertEqual(entry, {"slice_error": "CuraEngine failed: bad value"})
+        with unittest.mock.patch.object(pa, "slice_part", side_effect=KeyError("/home/secret")):
+            pa.slice_one(cfg, cfg["entries"][0], 0, "c" * 40, self.dir, entry, models)
+        self.assertEqual(entry, {"slice_error": "the slice failed: KeyError"})
+        self.assertEqual(models, {})
+
+    def test_cache(self):
+        cfg = self.config(self.PARTS)
+        p = cfg["entries"][0]
+        cache = os.path.join(self.dir, "cache")
+        os.makedirs(cache)
+        open(os.path.join(cache, pa.part_digest(p) + ".gcode"), "w").write(";TIME:60\n")
+        json.dump({"seconds": 60, "grams": 1.5, "layers": 4, "layer_height": 0.2, "slicer": "CuraEngine 5.13.0"},
+                  open(os.path.join(cache, pa.part_digest(p) + ".json"), "w"))
+        open(os.path.join(cache, "0" * 64 + ".gcode"), "w").write("old")
+        entry, models = {"models": ["part1-1.stl"]}, {}
+        with unittest.mock.patch.object(pa, "PART_CACHE", cache):
+            pa.slice_one(cfg, p, 0, "c" * 40, self.dir, entry, models)
+            pa.prune_cache({pa.part_digest(p)})
+        self.assertEqual({k: entry[k] for k in ("seconds", "grams", "layers", "slice_file", "slice_size")},
+                         {"seconds": 60, "grams": 1.5, "layers": 4, "slice_file": "part1.gcode", "slice_size": 9})
+        self.assertEqual(sorted(models), ["part1.gcode"])
+        self.assertEqual(sorted(os.listdir(cache)), sorted(pa.part_digest(p) + e for e in (".gcode", ".json")))
