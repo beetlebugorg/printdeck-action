@@ -133,6 +133,21 @@ class Slice(unittest.TestCase):
         self.assertIn(";Printdeck title: Cube", open(out).read(2000))
 
 
+class MeshSettings(unittest.TestCase):
+    def test_derived_values(self):
+        g, e, mat, _ = c.build(PROFILE, "pla-0.20-standard", "roll-4", {})
+        gs, es = c.engine_settings(g, e, "x", mat)
+        resolve = c.mesh_resolver(PROFILE, "pla-0.20-standard", "roll-4", {}, gs, es)
+        m = resolve({"infill_sparse_density": "40", "infill_pattern": "lines"})
+        # The line distance follows the density, as in the Cura app: 0.5 mm * 100 / 40.
+        self.assertAlmostEqual(m["infill_line_distance"], float(es["line_width"]) * 100 / 40)
+        self.assertEqual(m["infill_pattern"], "lines")
+        # A value of a 3MF file of the Cura app is a formula.
+        m = resolve({"infill_mesh": "=True", "wall_line_count": "=0", "top_layers": "0"})
+        self.assertEqual((m["infill_mesh"], m["wall_line_count"], m["top_layers"]), (True, 0, 0))
+        self.assertEqual(resolve({}), {})
+
+
 def profile_copy():
     """A copy of the test profile in a new folder, and the content of its cura.json."""
     import json

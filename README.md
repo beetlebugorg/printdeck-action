@@ -174,10 +174,11 @@ docs:                           # optional: the PDFs of the project, for the pro
   ```
 - `prebuilt`: a `.cbddlp`, `.ctb` or G-code (`.gcode`, `.gco`, `.g`) file, at most 200 MB.
 - `files`: STL or 3MF. A 3MF file keeps the Cura settings of its objects, for example a support
-  blocker (`cura:anti_overhang_mesh`). CuraEngine reads each value as it is: write `0` and
-  `True`, and write the values that Cura calculates (for example `infill_line_distance` for
-  another `infill_sparse_density`). Put the objects of one part in one group (one build item):
-  the Action puts each build item at its own place on the plate.
+  blocker (`cura:anti_overhang_mesh`). The settings of a mesh (in its 3MF file, and the
+  `settings` of its part) go on top of the profile, as in the Cura app: a value can be a formula
+  (`=0`), and the values that follow from them change too (for example `infill_line_distance`
+  for another `infill_sparse_density`). Put the objects of one part in one group (one build
+  item): the Action puts each build item at its own place on the plate.
 - The 3D model of a part is its file. A 3MF part with an infill mesh, a cutting mesh or a support
   mesh (`cura:infill_mesh` and so on) prints a pattern that its mesh does not show. For such a
   part with one file, the 3D model is made from the G-code of the plan: each printed line is a
