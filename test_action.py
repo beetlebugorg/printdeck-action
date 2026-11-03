@@ -6,6 +6,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+import unittest.mock
 import zipfile
 
 import printdeck_action as pa
@@ -113,13 +114,17 @@ class Material(unittest.TestCase):
 class Config(unittest.TestCase):
     def test_checks(self):
         d = tempfile.mkdtemp()
-        p = os.path.join(d, "printdeck.yml")
-        for text in ("parts: []\n", "parts:\n  - {name: A, printer: taz}\n",
-                     "parts:\n  - {name: A, files: [a], printer: taz, profile: p/q}\n  - {name: a, files: [b], printer: taz, profile: p/q}\n",
-                     "parts:\n  - {name: A, files: [a], printer: taz}\n"):
-            open(p, "w").write(text)
-            with self.assertRaises(SystemExit, msg=text):
-                pa.load_config(p)
+        cwd = os.getcwd()
+        os.chdir(d)
+        try:
+            for text in ("parts: []\n", "parts:\n  - {name: A, printer: taz}\n",
+                         "parts:\n  - {name: A, files: [a], printer: taz, profile: p/q}\n  - {name: a, files: [b], printer: taz, profile: p/q}\n",
+                         "parts:\n  - {name: A, files: [a], printer: taz}\n"):
+                open("printdeck.yml", "w").write(text)
+                with self.assertRaises(SystemExit, msg=text):
+                    pa.load_config("printdeck.yml")
+        finally:
+            os.chdir(cwd)
 
 
 if __name__ == "__main__":
@@ -386,3 +391,160 @@ class Assemblies(unittest.TestCase):
         a = self.config("")["entries"]
         b = self.config(self.GOOD)["entries"]
         self.assertEqual([pa.part_digest(p) for p in a], [pa.part_digest(p) for p in b])
+
+
+class InRepo(unittest.TestCase):
+    """A test in a new folder as the repository."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.cwd = os.getcwd()
+        os.chdir(self.dir)
+        cube("a.stl", 10)
+
+    def tearDown(self):
+        os.chdir(self.cwd)
+
+    def config(self, text):
+        open("printdeck.yml", "w").write(text)
+        return pa.load_config("printdeck.yml")
+
+
+class Names(InRepo):
+    def test_control_characters(self):
+        part = "  - {name: A, files: [a.stl], printer: taz, profile: p/q}\n"
+        bad = ['project: "x\\nG28"\nparts:\n' + part,
+               'parts:\n  - {name: "A\\nG28", files: [a.stl], printer: taz, profile: p/q}\n',
+               'parts:\n  - {name: "A\\r::error::x", files: [a.stl], printer: taz, profile: p/q}\n',
+               'parts:\n  - {name: "A\\u2028B", files: [a.stl], printer: taz, profile: p/q}\n',
+               'parts:\n  - {name: "A\\x1b[0m", files: [a.stl], printer: taz, profile: p/q}\n',
+               'parts:\n  - {name: A, files: [a.stl], printer: taz, profile: p/q, group: "G\\nx"}\n',
+               'parts:\n  - {name: A, files: [a.stl], printer: taz, profile: p/q, material: "m\\x7f"}\n',
+               'parts:\n  - name: A\n    printer: taz\n    profile: p/q\n    variants:\n      - {name: "fine\\nG28", files: [a.stl]}\n',
+               'parts:\n' + part + 'assemblies:\n  - {name: "S\\nx", items: [{name: B, file: a.stl}]}\n',
+               'parts:\n' + part + 'assemblies:\n  - {name: S, items: [{name: "B\\nx", file: a.stl}]}\n',
+               'parts:\n  - {name: A, files: ["a\\n.stl"], printer: taz, profile: p/q}\n']
+        for text in bad:
+            with self.assertRaises(SystemExit, msg=text):
+                self.config(text)
+        cfg = self.config('project: bittlex\nparts:\n  - {name: A, files: [a.stl], printer: taz, profile: p/q, '
+                          'description: "Line one.\\nLine two."}\n')
+        self.assertEqual(cfg["entries"][0]["description"], "Line one.\nLine two.")
+
+    def test_fail_escapes_line_breaks(self):
+        out = io.StringIO()
+        with unittest.mock.patch("sys.stdout", out), self.assertRaises(SystemExit):
+            pa.fail("a\n::add-mask::x\r50%")
+        self.assertEqual(out.getvalue(), "::error::a%0A::add-mask::x%0D50%25\n")
+
+
+class GitPaths(InRepo):
+    def test_no_paths_in_git(self):
+        os.makedirs(".git")
+        open(".git/config", "w").write("[core]\n")
+        os.symlink(".git", "dotgit")
+        os.symlink(".git/config", "config.stl")
+        for bad in (".git/config", "a/.git/x", ".GIT/config", "dotgit/config", "config.stl"):
+            with self.assertRaises(SystemExit, msg=bad):
+                pa.inside(bad)
+        self.assertEqual(pa.inside("a.stl"), "a.stl")
+        for text in ('parts:\n  - {name: A, files: [.git/config], printer: taz, profile: p/q}\n',
+                     'parts:\n  - {name: A, files: [a.stl], printer: phenom, prebuilt: .git/x.cbddlp}\n',
+                     'parts:\n  - {name: A, files: [a.stl], printer: taz, profile: p/q}\ncover: .git/x.png\n',
+                     'parts:\n  - {name: A, files: [a.stl], printer: taz, profile: p/q}\ndocs:\n  - {name: D, file: .git/x.pdf}\n'):
+            with self.assertRaises(SystemExit, msg=text):
+                self.config(text)
+
+    def test_config_is_a_link(self):
+        os.symlink("/proc/self/environ", "printdeck.yml")
+        with self.assertRaises(SystemExit):
+            pa.load_config("printdeck.yml")
+
+
+class Prebuilt(InRepo):
+    def test_extensions_and_size(self):
+        for ext in (".cbddlp", ".ctb", ".gcode", ".CBDDLP"):
+            open("plate" + ext, "wb").write(b"x" * 10)
+            self.config(f"parts:\n  - {{name: A, files: [a.stl], printer: phenom, prebuilt: plate{ext}}}\n")
+            self.assertEqual(pa.check_prebuilt("plate" + ext, "p"), ext.lower())
+        for bad in ("plate.txt", "plate", "plate.cbddlp.sh"):
+            with self.assertRaises(SystemExit, msg=bad):
+                self.config(f"parts:\n  - {{name: A, files: [a.stl], printer: phenom, prebuilt: {bad}}}\n")
+        with self.assertRaises(SystemExit):
+            pa.check_prebuilt("none.cbddlp", "p")
+        with unittest.mock.patch.object(pa, "MAX_PREBUILT", 5), self.assertRaises(SystemExit):
+            pa.check_prebuilt("plate.cbddlp", "p")
+
+    def test_paths_again_after_the_generate_step(self):
+        cfg = self.config("parts:\n  - {name: A, files: [a.stl], printer: taz, profile: p/q}\n")
+        os.remove("a.stl")
+        os.symlink("/etc/passwd", "a.stl")
+        with self.assertRaises(SystemExit):
+            pa.check_paths(cfg, "printdeck.yml")
+
+
+class SliceCommit(InRepo):
+    def run_build(self, commit, heads):
+        calls, runs = [], []
+
+        def call(method, path, body=None):
+            calls.append((method, path, body))
+            return {"id": "b1", "commit": commit, "plates": []} if method == "GET" else {"url": "u", "grant": {}}
+
+        def git(*args):
+            return heads.pop(0) + "\n" if args[0] == "rev-parse" and args[1] == "HEAD" else ""
+
+        def run(args, **kw):
+            runs.append(args)
+            return subprocess.CompletedProcess(args, 0)
+
+        with unittest.mock.patch.multiple(pa, call=call, git=git, do_slice=lambda *a: []), \
+                unittest.mock.patch.object(pa.subprocess, "run", run), unittest.mock.patch.dict(os.environ, {"PRINTDECK_STARTED": "1"}), \
+                unittest.mock.patch("sys.stdout", io.StringIO()):
+            try:
+                pa.slice_build("printdeck.yml", "b1")
+            except SystemExit:
+                return calls, runs, True
+        return calls, runs, False
+
+    def test_bad_commit(self):
+        for bad in ("--upload-pack=touch /tmp/x", "HEAD", "a" * 39, "A" * 40, None, 7):
+            calls, runs, failed = self.run_build(bad, ["0" * 40])
+            self.assertTrue(failed, bad)
+            self.assertEqual(runs, [], bad)
+            self.assertTrue(any(p.endswith("/failed") for _, p, _ in calls), bad)
+
+    def test_checkout(self):
+        good = "a" * 40
+        calls, runs, failed = self.run_build(good, ["b" * 40, good, good])
+        self.assertFalse(failed)
+        self.assertIn(["git", "checkout", "--quiet", "--detach", good, "--"], runs)
+        fetch = next(r for r in runs if r[:2] == ["git", "fetch"])
+        self.assertEqual(fetch[-2:], ["--", good])
+        # The checkout is not the commit of the build.
+        calls, runs, failed = self.run_build(good, ["b" * 40, "", "b" * 40])
+        self.assertTrue(failed)
+        self.assertTrue(any(p.endswith("/failed") for _, p, _ in calls))
+
+    def test_failure_text(self):
+        import configparser
+        e = configparser.MissingSectionHeaderError("/proc/self/environ", 1, "ACTIONS_ID_TOKEN_REQUEST_TOKEN=secret\n")
+        self.assertEqual(pa.failure_text(e), "The slice run failed: MissingSectionHeaderError. See the run on GitHub.")
+        self.assertEqual(pa.failure_text(pa.curaslice.ProfileError("the profile x/y: a\nb")),
+                         "The slice run failed: the profile x/y: a b")
+
+
+class SliceModelSize(InRepo):
+    def test_size_before_the_slice(self):
+        import shutil
+        shutil.copytree(os.path.join(self.cwd, "testdata", "taz-workhorse-se"), os.path.join("profiles", "taz-workhorse-se"))
+        open("printdeck.yml", "w").write("parts:\n  - {name: A, files: [a.stl], printer: taz, profile: taz-workhorse-se/pla-0.10-fine}\n")
+        job = {"id": "b1", "commit": "a" * 40, "plates": [{"printer": "taz", "process": "fdm", "parts": [{"name": "A", "count": 1}]}]}
+        sliced = []
+        with unittest.mock.patch.object(pa, "call", lambda *a, **k: {}), \
+                unittest.mock.patch.object(pa, "MAX_MODEL", 100), \
+                unittest.mock.patch.object(pa.curaslice, "slice_plate", lambda *a, **k: sliced.append(a)), \
+                unittest.mock.patch("sys.stdout", io.StringIO()):
+            with self.assertRaises(SystemExit):
+                pa.do_slice("printdeck.yml", job)
+        self.assertEqual(sliced, [])

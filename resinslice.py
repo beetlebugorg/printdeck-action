@@ -404,11 +404,20 @@ def load_profile(profile_dir, name):
     """The settings of the profile name of profiles/<folder>/resin.json, for write_cbddlp, with
     "prusaslicer": the PrusaSlicer settings of the printer and of the profile, and "margin": the
     room around each part on the plate in mm."""
+    import curaslice
     try:
-        with open(os.path.join(profile_dir, "resin.json"), encoding="utf-8") as f:
+        # resin.json and each file of the folder must stay in the folder after their links.
+        curaslice.check_tree(profile_dir)
+        path = curaslice.within(profile_dir, "resin.json")
+    except curaslice.ProfileError as e:
+        raise ProfileError(str(e)) from None
+    try:
+        with open(path, encoding="utf-8") as f:
             doc = json.load(f)
+        if not isinstance(doc, dict):
+            raise ValueError("not an object")
     except (OSError, ValueError) as e:
-        raise ProfileError(f"{profile_dir}/resin.json: {e}")
+        raise ProfileError(f"{profile_dir}/resin.json could not be read ({type(e).__name__})") from None
     printer, prof = doc.get("printer") or {}, (doc.get("profiles") or {}).get(name)
     if prof is None:
         raise ProfileError(f"{profile_dir}/resin.json has no profile {name}")

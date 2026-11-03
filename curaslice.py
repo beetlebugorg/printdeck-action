@@ -57,22 +57,113 @@ def safe_attribute(n):
             and all(isinstance(e, ast.Constant) for e in n.value.elts))
 
 
+# The functions of math that can run for a long time with a large integer.
+SLOW_MATH = {"factorial", "comb", "perm", "prod", "isqrt", "lcm", "gcd"}
+
+
+class FormulaError(ValueError):
+    pass
+
+
 def check_formula(tree):
     """Refuses a formula with a part of Python that Cura's formulas do not use."""
     for n in ast.walk(tree):
         if not isinstance(n, SAFE_NODES):
-            raise ValueError(f"a formula may not use {type(n).__name__}")
+            raise FormulaError(f"a formula may not use {type(n).__name__}")
         if isinstance(n, ast.Name) and "__" in n.id:
-            raise ValueError(f"a formula may not use the name {n.id}")
+            raise FormulaError(f"a formula may not use the name {n.id!r}")
         if isinstance(n, ast.Attribute) and not safe_attribute(n):
-            raise ValueError("a formula may use only the attributes of math, and index or count of a list of constants")
+            raise FormulaError("a formula may use only the attributes of math, and index or count of a list of constants")
+        if isinstance(n, ast.Attribute) and n.attr in SLOW_MATH:
+            raise FormulaError(f"a formula may not use math.{n.attr}")
         if isinstance(n, ast.Call):
             f = n.func
             ok = (isinstance(f, ast.Name) and f.id in SAFE_CALLS) or (isinstance(f, ast.Attribute) and safe_attribute(f))
             if not ok:
-                raise ValueError("a formula may call only the functions of Cura and math")
+                raise FormulaError("a formula may call only the functions of Cura and math")
         if isinstance(n, ast.Constant) and isinstance(n.value, str) and "__" in n.value:
-            raise ValueError("a formula may not use a string with __")
+            raise FormulaError("a formula may not use a string with __")
+        if isinstance(n, (ast.ListComp, ast.GeneratorExp)):
+            # One loop for each comprehension, and no comprehension in another one: a formula
+            # with nested loops can run for hours.
+            if len(n.generators) > 1 or any(isinstance(m, (ast.ListComp, ast.GeneratorExp)) for m in ast.walk(n) if m is not n):
+                raise FormulaError("a formula may have only one loop in a comprehension, and no comprehension in another one")
+
+
+# The limits of the values of a formula. A profile of a pull request must not make the slice run
+# use all the memory or all the time of the runner, for example with 10**10**9 or [0]*10**10.
+MAX_BITS = 4096
+MAX_ITEMS = 10000
+SEQUENCES = (str, list, tuple)
+
+
+def is_int(v):
+    return isinstance(v, int)
+
+
+def check_int(v):
+    if is_int(v) and v.bit_length() > MAX_BITS:
+        raise FormulaError(f"a formula may not make an integer of more than {MAX_BITS} bits")
+    return v
+
+
+def check_items(v):
+    if isinstance(v, SEQUENCES) and len(v) > MAX_ITEMS:
+        raise FormulaError(f"a formula may not make a list or a string of more than {MAX_ITEMS} items")
+    return v
+
+
+def op_pow(a, b):
+    if is_int(a) and is_int(b) and b > 0 and abs(a) > 1 and (b > MAX_BITS or a.bit_length() * b > MAX_BITS * 2):
+        raise FormulaError(f"a formula may not make an integer of more than {MAX_BITS} bits")
+    return check_int(a ** b)
+
+
+def op_mul(a, b):
+    for seq, n in ((a, b), (b, a)):
+        if isinstance(seq, SEQUENCES) and is_int(n) and len(seq) * max(n, 0) > MAX_ITEMS:
+            raise FormulaError(f"a formula may not make a list or a string of more than {MAX_ITEMS} items")
+    return check_int(a * b)
+
+
+def op_lshift(a, b):
+    if is_int(a) and is_int(b) and b > MAX_BITS:
+        raise FormulaError(f"a formula may not make an integer of more than {MAX_BITS} bits")
+    return check_int(a << b)
+
+
+def op_add(a, b):
+    if isinstance(a, SEQUENCES) and isinstance(b, SEQUENCES) and len(a) + len(b) > MAX_ITEMS:
+        raise FormulaError(f"a formula may not make a list or a string of more than {MAX_ITEMS} items")
+    return check_int(a + b)
+
+
+def op_mod(a, b):
+    # "%" of a string is a format, and "%0999999999d" makes a string of 1 GB.
+    if isinstance(a, (str, bytes)):
+        raise FormulaError("a formula may not format a string with %")
+    return a % b
+
+
+def bounded_sum(items, start=0):
+    if not isinstance(start, (int, float)):
+        raise FormulaError("a formula may add only numbers with sum")
+    return check_int(sum(items, start))
+
+
+OPERATIONS = {ast.Pow: "_pow", ast.Mult: "_mul", ast.LShift: "_lshift", ast.Add: "_add", ast.Mod: "_mod"}
+
+
+class Bounded(ast.NodeTransformer):
+    """Puts a call of a function with limits (op_pow, op_mul, ...) in place of each operator
+    that can make a large value."""
+
+    def visit_BinOp(self, n):
+        self.generic_visit(n)
+        name = OPERATIONS.get(type(n.op))
+        if name is None:
+            return n
+        return ast.copy_location(ast.Call(func=ast.Name(id=name, ctx=ast.Load()), args=[n.left, n.right], keywords=[]), n)
 
 
 class Formula:
@@ -80,19 +171,90 @@ class Formula:
         self.expr = expr.strip()
         tree = ast.parse(self.expr, mode="eval")
         check_formula(tree)
-        self.code = compile(tree, "<setting>", "eval")
         self.names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+        self.code = compile(ast.fix_missing_locations(Bounded().visit(tree)), "<setting>", "eval")
 
     def __repr__(self):
         return "=" + self.expr
 
 
+# The paths of a profile.
+
+class ProfileError(ValueError):
+    pass
+
+
+# A control character or a line break. A line break in a name adds a line to the G-code.
+CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+LINE_BREAK = re.compile(r"[\r\n\x0b\x0c\x1c-\x1e\x85\u2028\u2029]")
+
+
+def one_line(text):
+    """The text with a space in place of each line break."""
+    return LINE_BREAK.sub(" ", str(text))
+
+
+def within(folder, rel, what="a file of the profile"):
+    """The real path of rel in folder, after a check that it stays in folder after its symbolic
+    links. A profile of a pull request must not make the run read a file of the runner, for
+    example /proc/self/environ or a link to it."""
+    r = rel if isinstance(rel, str) else ""
+    if not r or os.path.isabs(r) or "\\" in r or CONTROL.search(r) or ".." in r.split("/"):
+        raise ProfileError(f"{what} must be a relative path in {os.path.basename(os.path.normpath(folder))}: {r!r}")
+    root = os.path.realpath(folder)
+    real = os.path.realpath(os.path.join(root, r))
+    if not real.startswith(root + os.sep):
+        raise ProfileError(f"{what} leaves {os.path.basename(os.path.normpath(folder))}: {r!r}")
+    return real
+
+
+def check_tree(folder):
+    """Checks that each file and folder in folder stays in folder after its symbolic links, and
+    that each file is a regular file. The run reads all the files of a profile folder for its
+    version, and CuraEngine reads the definitions folder."""
+    root = os.path.realpath(folder)
+    for top, dirs, files in os.walk(folder):
+        for n in dirs + files:
+            p = os.path.join(top, n)
+            real = os.path.realpath(p)
+            if not real.startswith(root + os.sep):
+                raise ProfileError(f"{os.path.relpath(p, folder)!r} leaves the profile folder")
+            if n in files and not os.path.isfile(real):
+                raise ProfileError(f"{os.path.relpath(p, folder)!r} is not a regular file")
+
+
+def read_error(what, rel, e):
+    """A ProfileError for a file that the run cannot read. It has the class of the error and no
+    text of the error: the text of a parse error can have a line of the file."""
+    detail = f": {one_line(e)}" if isinstance(e, (FormulaError, ProfileError)) else ""
+    return ProfileError(f"{what}: the file {rel!r} could not be read ({type(e).__name__}{detail})")
+
+
+READ_ERRORS = (OSError, ValueError, SyntaxError, KeyError, TypeError, AttributeError, configparser.Error, ET.ParseError,
+               RecursionError)
+
+DEFINITION = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]*")
+
+
 # The definitions.
 
-def load_definition(folder, name):
-    """The settings of the definition name and its parents: key -> properties."""
-    d = json.load(open(os.path.join(folder, name + ".def.json"), encoding="utf-8"))
-    out = load_definition(folder, d["inherits"]) if d.get("inherits") else {}
+def load_definition(folder, name, depth=0):
+    """The settings of the definition name and its parents: key -> properties. The definitions
+    are in folder."""
+    if not isinstance(name, str) or not DEFINITION.fullmatch(name) or ".." in name:
+        raise ProfileError(f"a bad name of a definition: {name!r}")
+    if depth > 20:
+        raise ProfileError(f"the definition {name!r} has more than 20 parents")
+    rel = name + ".def.json"
+    path = within(folder, rel, "a definition")
+    try:
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+        if not isinstance(d, dict):
+            raise ValueError("not an object")
+    except READ_ERRORS as e:
+        raise read_error("the definitions", rel, e) from None
+    out = load_definition(folder, d["inherits"], depth + 1) if d.get("inherits") else {}
     out = {k: dict(v) for k, v in out.items()}
 
     def walk(node):
@@ -312,9 +474,10 @@ class Stack:
         }
 
 
-FUNCTIONS = {"math": math, "min": min, "max": max, "abs": abs, "round": round, "sum": sum, "len": len, "int": int,
+FUNCTIONS = {"math": math, "min": min, "max": max, "abs": abs, "round": round, "sum": bounded_sum, "len": len, "int": int,
              "float": float, "str": str, "bool": bool, "any": any, "all": all, "map": map, "list": list, "sorted": sorted,
-             "True": True, "False": False, "None": None, "__builtins__": {}}
+             "True": True, "False": False, "None": None, "__builtins__": {},
+             "_pow": op_pow, "_mul": op_mul, "_lshift": op_lshift, "_add": op_add, "_mod": op_mod}
 
 
 def cast(v, kind):
@@ -366,40 +529,72 @@ def expand(text, stack, extra):
     return TOKEN.sub(one, text)
 
 
+def read_meta(profile_dir):
+    """The content of cura.json of profile_dir."""
+    check_tree(profile_dir)
+    try:
+        with open(within(profile_dir, "cura.json"), encoding="utf-8") as f:
+            meta = json.load(f)
+        if not isinstance(meta, dict):
+            raise ValueError("not an object")
+    except ProfileError:
+        raise
+    except READ_ERRORS as e:
+        raise read_error(f"the profile {os.path.basename(os.path.normpath(profile_dir))}", "cura.json", e) from None
+    return meta
+
+
+def definitions_dir(profile_dir):
+    return within(profile_dir, "definitions", "the definitions folder")
+
+
 def build(profile_dir, quality, material=None, overrides=None):
-    """The global stack and the extruder stack of a profile of profile_dir."""
-    meta = json.load(open(os.path.join(profile_dir, "cura.json"), encoding="utf-8"))
-    ddir = os.path.join(profile_dir, "definitions")
-    gdefs = load_definition(ddir, meta["machine"])
-    edefs_only = load_definition(ddir, meta["extruder"])
+    """The global stack and the extruder stack of a profile of profile_dir. Each file of the
+    profile must stay in profile_dir, and each definition in profile_dir/definitions."""
+    meta = read_meta(profile_dir)
+    what = f"the profile {os.path.basename(os.path.normpath(profile_dir))}/{quality}"
+    ddir = definitions_dir(profile_dir)
+    gdefs = load_definition(ddir, meta.get("machine"))
+    edefs_only = load_definition(ddir, meta.get("extruder"))
     edefs = {k: dict(v) for k, v in gdefs.items()}
     for k, v in edefs_only.items():
         edefs.setdefault(k, {}).update(v)
-    q = meta["profiles"][quality]
-    path = lambda rel: os.path.join(profile_dir, rel)
+    q = (meta.get("profiles") or {}).get(quality)
+    if not isinstance(q, dict):
+        raise ProfileError(f"{what}: cura.json has no profile {quality!r}")
+
+    def read(reader, rel):
+        path = within(profile_dir, rel, f"a file of {what}")
+        try:
+            return reader(path, gdefs)
+        except READ_ERRORS as e:
+            raise read_error(what, rel, e) from None
+
     user = {k: typed(v, gdefs.get(k, {}).get("type")) for k, v in (overrides or {}).items()}
     glob = Stack("global", [
         {k: v for k, v in user.items() if not gdefs.get(k, {}).get("settable_per_extruder", True)},
-        read_instance(path(q["quality_changes"]), gdefs),
+        read(read_instance, q.get("quality_changes")),
         {},  # intent
-        read_instance(path(q["quality"]), gdefs),
+        read(read_instance, q.get("quality")),
         {},  # material
         {},  # variant
-        read_instance(path(meta["definition_changes"]), gdefs),
+        read(read_instance, meta.get("definition_changes")),
         definition_container(gdefs),
     ], gdefs)
     mvals, mmeta = {}, {}
     if material:
-        m = meta["materials"][material]
-        mvals, mmeta = read_material(path(m["file"]), gdefs)
+        m = (meta.get("materials") or {}).get(material)
+        if not isinstance(m, dict):
+            raise ProfileError(f"{what}: cura.json has no material {material!r}")
+        mvals, mmeta = read(read_material, m.get("file"))
     ext = Stack("extruder 0", [
         {k: v for k, v in user.items() if gdefs.get(k, {}).get("settable_per_extruder", True)},
-        read_instance(path(q["quality_changes_extruder"]), gdefs),
+        read(read_instance, q.get("quality_changes_extruder")),
         {},
         {},
         mvals,
         {},
-        read_instance(path(meta["definition_changes_extruder"]), gdefs),
+        read(read_instance, meta.get("definition_changes_extruder")),
         definition_container(edefs_only),
     ], edefs, nxt=glob, position=0)
     glob.extruders = [ext]
@@ -410,6 +605,8 @@ def engine_settings(glob, ext, jobname, mmeta):
     """The settings for CuraEngine: all the keys of each stack, and the expanded G-code."""
     extra = {"jobname": jobname, "material_name": mmeta.get("material", ""), "material_brand": mmeta.get("brand", ""),
              "material_type": mmeta.get("material", ""), "initial_extruder_nr": 0}
+    # A name goes into the start G-code: a line break in it adds a line of G-code.
+    extra = {k: one_line(v) for k, v in extra.items()}
     gs, es = {}, {}
     for k in glob.defs:
         if glob.defs[k].get("type") == "category":
@@ -442,6 +639,11 @@ def engine_command():
 
 
 NS3MF = "{http://schemas.microsoft.com/3dmanufacturing/core/2015/02}"
+# The limits of the build of a 3MF file. A component can be in the build many times, so a small
+# file can make a large build.
+MAX_3MF_DEPTH = 16
+MAX_3MF_MESHES = 10000
+MAX_3MF_TRIANGLES = 5_000_000
 
 
 def read_3mf(path):
@@ -449,6 +651,7 @@ def read_3mf(path):
     its triangles (in mm, with the transforms) and its Cura settings (metadata "cura:<key>",
     for example cura:anti_overhang_mesh for a support blocker)."""
     import zipfile
+    path_name = os.path.basename(path)
     z = zipfile.ZipFile(path)
     name = next(n for n in z.namelist() if n.lower().endswith(".model"))
     root = ET.fromstring(z.read(name))
@@ -479,8 +682,18 @@ def read_3mf(path):
         x, y, z = p
         return (x * m[0] + y * m[3] + z * m[6] + m[9], x * m[1] + y * m[4] + z * m[7] + m[10], x * m[2] + y * m[5] + z * m[8] + m[11])
 
-    def flat(oid, mats, out):
+    count = [0, 0]  # the meshes and the triangles of the build
+
+    def flat(oid, mats, out, path=()):
+        if oid not in objects:
+            raise SystemExit(f"{path_name}: a component of no object {oid!r}")
+        if len(path) >= MAX_3MF_DEPTH or oid in path:
+            raise SystemExit(f"{path_name}: the components are more than {MAX_3MF_DEPTH} deep, or in a loop")
         name, tris, settings, comps = objects[oid]
+        count[0] += 1
+        count[1] += len(tris)
+        if count[0] > MAX_3MF_MESHES or count[1] > MAX_3MF_TRIANGLES:
+            raise SystemExit(f"{path_name}: the build has more than {MAX_3MF_MESHES} meshes or {MAX_3MF_TRIANGLES} triangles")
         if tris:
             pts = []
             for tri in tris:
@@ -490,7 +703,7 @@ def read_3mf(path):
                 pts.append(q)
             out.append({"name": name, "triangles": pts, "settings": settings})
         for cid, t in comps:
-            flat(cid, [matrix(t)] + mats, out)
+            flat(cid, [matrix(t)] + mats, out, path + (oid,))
 
     items = []
     for it in root.iter(NS3MF + "item"):
@@ -682,8 +895,7 @@ def split_settings(defs, parts):
 def slice_plate(profile_dir, quality, material, parts, out, name="plate", meta=()):
     """Slices one plate. parts: (name, files, count, settings) for each part. It returns the facts
     of the slice and the profile with its version."""
-    defs = load_definition(os.path.join(profile_dir, "definitions"),
-                           json.load(open(os.path.join(profile_dir, "cura.json"), encoding="utf-8"))["machine"])
+    defs = load_definition(definitions_dir(profile_dir), read_meta(profile_dir).get("machine"))
     plate, per = split_settings(defs, [(p[0], p[3]) for p in parts])
     glob, ext, mmeta, meta_json = build(profile_dir, quality, material, plate)
     gs, es = engine_settings(glob, ext, name, mmeta)
@@ -701,7 +913,7 @@ def slice_plate(profile_dir, quality, material, parts, out, name="plate", meta=(
     for (pname, files, count, _), mine in zip(parts, per):
         for f in files:
             meshes += [(f, mine)] * max(1, count)
-    slice_files(meshes, gs, es, out, os.path.join(profile_dir, "definitions"), 1, lines)
+    slice_files(meshes, gs, es, out, definitions_dir(profile_dir), 1, lines)
     f = facts(out)
     if "metres" in f:
         r = float(es.get("material_diameter") or gs.get("material_diameter") or 2.85) / 2
@@ -735,7 +947,8 @@ def write_header(gcode, log, extra=()):
         n += 1
     while n < len(lines) and not lines[n].strip():
         n += 1
-    open(gcode, "w", encoding="utf-8").write("\n".join(header + list(extra) + lines[n:]))
+    # A line of extra with a line break adds a line of G-code.
+    open(gcode, "w", encoding="utf-8").write("\n".join(header + [one_line(l) for l in extra] + lines[n:]))
 
 
 def facts(gcode):
@@ -796,7 +1009,7 @@ def main():
         lines.append(f";Printdeck {k.strip()}: {v.strip()}")
     profile = f"{os.path.basename(os.path.normpath(a.profile))}/{a.quality}@{version}"
     lines.append(f";Printdeck profile: {profile}")
-    slice_files(a.meshes, gs, es, out, os.path.join(a.profile, "definitions"), a.count, lines)
+    slice_files(a.meshes, gs, es, out, definitions_dir(a.profile), a.count, lines)
     density = 1.24
     f = facts(out)
     if "metres" in f:

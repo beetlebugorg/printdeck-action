@@ -78,8 +78,14 @@ def table(header, rows):
     return "\n".join(out) + "\n"
 
 
+def command_data(text):
+    """The text for the data of a workflow command, with %, CR and LF escaped as GitHub asks. A
+    line break in a message must not start a workflow command of its own."""
+    return str(text).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
 def fail(msg):
-    print(f"::error::{msg}", flush=True)
+    print(f"::error::{command_data(msg)}", flush=True)
     raise SystemExit(1)
 
 
@@ -180,13 +186,53 @@ def label(e):
     return f"{e['name']} ({e['variant']})" if e.get("variant") else e["name"]
 
 
+# A control character or a line break. A name goes into the G-code and into the log, so a line
+# break in it adds a line of G-code or a workflow command. description can have line breaks: it
+# goes only to the service.
+CONTROL = curaslice.CONTROL
+
+
+def one_line(v, what):
+    """Refuses v when it has a control character or a line break."""
+    if v is not None and CONTROL.search(str(v)):
+        fail(f"{what} has a control character or a line break: {str(v)!r}")
+
+
+# The files that a part can have as its prebuilt file, with the extension of the upload. The deck
+# prints a .cbddlp or a .ctb on the Phenom, and G-code on an FDM printer.
+PREBUILT = {".cbddlp": ".cbddlp", ".ctb": ".ctb", ".gcode": ".gcode", ".gco": ".gco", ".g": ".g"}
+MAX_PREBUILT = 200 << 20
+
+
+def prebuilt_ext(path, what):
+    """The extension of the upload of a prebuilt file, from PREBUILT."""
+    ext = PREBUILT.get(os.path.splitext(str(path))[1].lower())
+    if ext is None:
+        fail(f"{what} is not a {', '.join(sorted(PREBUILT))} file: {str(path)!r}")
+    return ext
+
+
+def check_prebuilt(path, what):
+    """Checks a prebuilt file before the run reads it: in the repository, with an extension of
+    PREBUILT, and at most 200 MB. It returns the extension of the upload."""
+    inside(path, what)
+    ext = prebuilt_ext(path, what)
+    if not os.path.isfile(path):
+        fail(f"{what}: no file {path}")
+    if os.path.getsize(path) > MAX_PREBUILT:
+        fail(f"{what}: {path} is over {MAX_PREBUILT >> 20} MB")
+    return ext
+
+
 def load_config(path):
+    inside(path, "the config file")
     if not os.path.exists(path):
         fail(f"no {path} in the repository")
     with open(path, encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
-    if not cfg.get("parts"):
+    if not isinstance(cfg, dict) or not cfg.get("parts"):
         fail(f"{path} has no parts")
+    one_line(cfg.get("project"), "project")
     cfg["entries"] = expand(cfg["parts"])
     names = set()
     for p in cfg["entries"]:
@@ -194,6 +240,8 @@ def load_config(path):
             fail(f"each part of {path} needs a name, a printer and files (in the part or in each variant)")
         if p.get("variants") is not None and not p.get("variant"):
             fail(f"{p['name']}: each variant needs a name")
+        for k in ("name", "variant", "printer", "process", "material", "profile", "group"):
+            one_line(p.get(k), f"{k} of a part")
         key = (p["name"].lower(), p["variant"].lower())
         if key in names:
             fail(f"two parts have the name {label(p)}")
@@ -206,6 +254,7 @@ def load_config(path):
             inside(f, f"a file of {label(p)}")
         if p.get("prebuilt"):
             inside(p["prebuilt"], f"the prebuilt file of {label(p)}")
+            prebuilt_ext(p["prebuilt"], f"the prebuilt file of {label(p)}")
         for k, most in (("description", MAX_DESCRIPTION), ("group", MAX_GROUP)):
             if p.get(k) is not None and (not isinstance(p[k], str) or len(p[k].strip()) > most):
                 fail(f"{label(p)}: {k} is a text of at most {most} characters")
@@ -215,6 +264,7 @@ def load_config(path):
     for d in docs:
         if not isinstance(d, dict) or not d.get("name") or not d.get("file"):
             fail(f"each doc of {path} needs a name and a file")
+        one_line(d["name"], "the name of a doc")
         inside(d["file"], f"the doc {d['name']}")
         if not str(d["file"]).lower().endswith(".pdf"):
             fail(f"the doc {d['name']} is not a PDF: {d['file']}")
@@ -252,6 +302,7 @@ def check_assemblies(cfg, path):
     for a in asms:
         if not isinstance(a, dict) or not is_text(a.get("name"), MAX_NAME):
             fail(f"each assembly of {path} needs a name of at most {MAX_NAME} characters")
+        one_line(a["name"], "the name of an assembly")
         name = a["name"].strip()
         if name.lower() in names:
             fail(f"two assemblies have the name {name}")
@@ -265,6 +316,8 @@ def check_assemblies(cfg, path):
             where = f"the assembly {name}, item {j + 1}"
             if not isinstance(it, dict):
                 fail(f"{where}: an item has a file, and a part or a name")
+            one_line(it.get("name"), f"{where}: name")
+            one_line(it.get("part"), f"{where}: part")
             if it.get("part") is not None:
                 e = by_label.get(str(it["part"]).strip().lower())
                 if e is None:
@@ -385,15 +438,40 @@ def process_of(part):
 def inside(path, what="a file"):
     """The path, after a check that it stays in the repository: a relative path with no "..",
     which also stays in the repository after its symbolic links. A pull request must not make the
-    run read a file of the runner, for example /etc/passwd or a link to it."""
+    run read a file of the runner, for example /etc/passwd or a link to it. A path in .git is
+    also refused: .git has the credentials of the checkout."""
     p = str(path)
-    if not p or os.path.isabs(p) or "\\" in p or "\0" in p or any(x == ".." for x in p.split("/")):
-        fail(f"{what} must be a path in the repository: {p}")
+    if not p or os.path.isabs(p) or "\\" in p or CONTROL.search(p) or any(x == ".." for x in p.split("/")):
+        fail(f"{what} must be a path in the repository: {p!r}")
+    if any(x.lower() == ".git" for x in p.split("/")):
+        fail(f"{what} is in .git: {p!r}")
     root = os.path.realpath(os.getcwd())
     real = os.path.realpath(os.path.join(root, p))
     if real != root and not real.startswith(root + os.sep):
-        fail(f"{what} leaves the repository: {p}")
+        fail(f"{what} leaves the repository: {p!r}")
+    if any(x.lower() == ".git" for x in os.path.relpath(real, root).split(os.sep)):
+        fail(f"{what} is a link into .git: {p!r}")
     return p
+
+
+def check_paths(cfg, config_path):
+    """Checks each path of printdeck.yml again with inside. The generate step can put a symbolic
+    link in place of a file after load_config checked it."""
+    inside(config_path, "the config file")
+    for p in cfg["entries"]:
+        for f in p["files"]:
+            inside(f, f"a file of {label(p)}")
+        if p.get("prebuilt"):
+            inside(p["prebuilt"], f"the prebuilt file of {label(p)}")
+        if p.get("profile"):
+            profile_of(p)
+    for d in cfg.get("docs") or []:
+        inside(d["file"], f"the doc {d['name']}")
+    if cfg.get("cover"):
+        inside(cfg["cover"], "the cover")
+    for a in cfg.get("assemblies") or []:
+        for it in a["items"]:
+            inside(it["file"], f"a file of the assembly {a['name']}")
 
 
 def profile_of(part):
@@ -406,6 +484,10 @@ def profile_of(part):
     stack = "resin.json" if process_of(part) == "resin" else "cura.json"
     if not quality or not os.path.exists(os.path.join(path, stack)):
         fail(f"{part['name']}: no profile {part['profile']} in profiles/ ({stack})")
+    try:
+        curaslice.check_tree(path)
+    except curaslice.ProfileError as e:
+        fail(f"{part['name']}: the profile {part['profile']}: {e}")
     return path, quality
 
 
@@ -635,7 +717,10 @@ def bed_and_margin(part):
         resin = resin_profile(part)
         return ("bed" in part and bed) or tuple(resin["bed"][:2]), resin["margin"]
     path, quality = profile_of(part)
-    glob, _, _, _ = curaslice.build(path, quality, part.get("material"), {k: str(v) for k, v in (part.get("settings") or {}).items()})
+    try:
+        glob, _, _, _ = curaslice.build(path, quality, part.get("material"), {k: str(v) for k, v in (part.get("settings") or {}).items()})
+    except curaslice.ProfileError as e:
+        fail(f"{label(part)}: {e}")
     gs = {k: glob.get(k) for k in ("machine_width", "machine_depth", "adhesion_type", "brim_line_count", "skirt_brim_line_width",
                                     "line_width", "skirt_gap", "skirt_line_count")}
     if "bed" not in part:
@@ -681,6 +766,7 @@ def plan(config_path):
                    {it["file"] for a in cfg.get("assemblies") or [] for it in a["items"]})
     with group("Generate the model files"):
         generate(cfg, files)
+    check_paths(cfg, config_path)
     head = os.environ.get("GITHUB_SHA") or git("rev-parse", "HEAD").strip()
     pr = 0
     if "pull_request" in ev:
@@ -699,6 +785,7 @@ def plan(config_path):
             if p.get(k):
                 entry[k] = " ".join(p[k].split()) if k == "group" else p[k].strip()
         if p.get("prebuilt"):
+            check_prebuilt(p["prebuilt"], f"the prebuilt file of {label(p)}")
             entry["prebuilt"] = p["prebuilt"]
         else:
             path, quality = profile_of(p)
@@ -786,20 +873,26 @@ def slice_build(config_path, build):
     # this call is for a run with no such step.
     if not os.environ.get("PRINTDECK_STARTED"):
         started(build)
-    head = git("rev-parse", "HEAD").strip()
-    if head != job["commit"]:
-        log(f"checking out the commit of the plan, {job['commit'][:7]}")
+    commit = job.get("commit")
+    if not isinstance(commit, str) or not COMMIT.fullmatch(commit):
+        call("POST", f"/builds/{build}/failed", {"error": "The slice run failed: the build has no valid commit."})
+        fail(f"the build has no valid commit: {str(commit)[:80]!r}")
+    if git("rev-parse", "HEAD").strip() != commit:
+        log(f"checking out the commit of the plan, {commit[:7]}")
         progress(build, "Getting the commit of the plan", PHASE_SETUP)
-        fetch_commit(job["commit"])
-        subprocess.run(["git", "checkout", "--quiet", "--detach", job["commit"]], check=True)
-    log(f"Build {build}: {len(job['plates'])} plates of the commit {job['commit'][:7]}")
+        fetch_commit(commit)
+        subprocess.run(["git", "checkout", "--quiet", "--detach", commit, "--"], check=True)
+    if git("rev-parse", "HEAD").strip() != commit:
+        call("POST", f"/builds/{build}/failed", {"error": "The slice run failed: the checkout is not the commit of the plan."})
+        fail(f"the checkout is not the commit of the plan, {commit}")
+    log(f"Build {build}: {len(job['plates'])} plates of the commit {commit[:7]}")
     try:
         files = do_slice(config_path, job)
     except SystemExit:
         call("POST", f"/builds/{build}/failed", {"error": "The slice run failed: see the run on GitHub."})
         raise
     except Exception as e:  # noqa: BLE001: any failure goes to the build page
-        call("POST", f"/builds/{build}/failed", {"error": f"The slice run failed: {e}"})
+        call("POST", f"/builds/{build}/failed", {"error": failure_text(e)})
         raise
     progress(build, "Sending the files of the plates", PHASE_UPLOAD)
     reply = call("POST", f"/builds/{build}/files", {"plates": [f for f, _ in files]})
@@ -825,17 +918,30 @@ def slice_build(config_path, build):
 
 
 PHASE_SETUP, PHASE_SLICE, PHASE_UPLOAD = "setup", "slice", "upload"
+# The commit of a build: the SHA-1 of a commit, 40 hex digits.
+COMMIT = re.compile(r"[0-9a-f]{40}")
+
+
+def failure_text(e):
+    """The error of a failed slice for the build page. A ProfileError has a text of this
+    Action, on one line. Any other error has only its class: the text of a parse error can have
+    a line of the file that the run read."""
+    if isinstance(e, (curaslice.ProfileError, resinslice.ProfileError)):
+        return f"The slice run failed: {curaslice.one_line(e)[:500]}"
+    return f"The slice run failed: {type(e).__name__}. See the run on GitHub."
 
 
 def fetch_commit(commit):
     """Fetches the commit of the plan. A shallow checkout (fetch-depth: 1) gets the commit alone,
-    and a partial clone (filter: blob:none) gets its files at the checkout."""
+    and a partial clone (filter: blob:none) gets its files at the checkout. commit is 40 hex
+    digits (COMMIT)."""
     shallow = git("rev-parse", "--is-shallow-repository").strip() == "true"
     depth = ["--depth=1"] if shallow else []
-    subprocess.run(["git", "fetch", "--quiet", *depth, "origin", commit], check=False)
+    subprocess.run(["git", "fetch", "--quiet", *depth, "origin", "--", commit], check=False)
     if subprocess.run(["git", "cat-file", "-e", commit + "^{commit}"], check=False).returncode != 0:
         # The commit of a pull request of a fork is in the refs of the pull requests.
-        subprocess.run(["git", "fetch", "--quiet", *depth, "origin", "+refs/pull/*/head:refs/remotes/origin/pull/*"], check=False)
+        subprocess.run(["git", "fetch", "--quiet", *depth, "origin", "--", "+refs/pull/*/head:refs/remotes/origin/pull/*"],
+                       check=False)
 
 
 def do_slice(config_path, job):
@@ -852,6 +958,13 @@ def do_slice(config_path, job):
                 raise SystemExit(f"plate {n}: printdeck.yml of this commit has no part {label(dict(pp, variant=pp.get('variant') or ''))}")
             parts.append((p, int(pp["count"])))
         first = parts[0][0]
+        # The run checks the size of each model file before a slicer reads it. A 3MF file can unpack to more.
+        for p, _ in parts:
+            if not first.get("prebuilt"):
+                for f in p["files"]:
+                    if not os.path.isfile(f):
+                        raise SystemExit(f"{label(p)}: no file {f}")
+                    check_model_size(f)
         entry = {"printer": plate["printer"], "process": plate["process"], "parts": plate["parts"],
                  "material_name": plate.get("material_name", ""), "material": plate.get("material", "")}
         title = " + ".join(label(p) + (f" x{c}" if c > 1 else "") for p, c in parts)
@@ -859,9 +972,7 @@ def do_slice(config_path, job):
         paths = {}
         if first.get("prebuilt"):
             src = first["prebuilt"]
-            if not os.path.exists(src):
-                raise SystemExit(f"{label(first)}: no prebuilt file {src}")
-            name = f"plate-{n}{os.path.splitext(src)[1].lower()}"
+            name = f"plate-{n}{check_prebuilt(src, f'the prebuilt file of {label(first)}')}"
             shutil.copyfile(src, os.path.join(tmp, name))
             paths[name] = os.path.join(tmp, name)
             entry["file"] = name
@@ -896,9 +1007,13 @@ def do_slice(config_path, job):
                 for p, c in parts:
                     log(f"  {label(p)} x{c}: {', '.join(p['files'])}" + (f", settings {p['settings']}" if p.get("settings") else ""))
                 t0 = __import__("time").time()
-                facts = curaslice.slice_plate(path, quality, first.get("material"),
-                                              [(label(p), p["files"], c, p.get("settings") or {}) for p, c in parts],
-                                              os.path.join(tmp, name), name=f"{cfg.get('project', 'printdeck')}-{n}", meta=meta)
+                try:
+                    facts = curaslice.slice_plate(path, quality, first.get("material"),
+                                                  [(label(p), p["files"], c, p.get("settings") or {}) for p, c in parts],
+                                                  os.path.join(tmp, name), name=f"{cfg.get('project', 'printdeck')}-{n}", meta=meta)
+                except curaslice.ProfileError as e:
+                    print(f"::error::{command_data(f'plate {n}: {e}')}", flush=True)
+                    raise
                 took = __import__("time").time() - t0
                 for w in curaslice.LAST_WARNINGS:
                     print(f"::warning title=CuraEngine, plate {n}::{w}", flush=True)

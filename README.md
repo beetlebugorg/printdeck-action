@@ -107,6 +107,14 @@ the commit of the pull request as data.
 The member turns on the Actions of the fork once (GitHub turns them off in a new fork). The
 GitHub App of Printdeck needs the permission Pull requests: Read, to find the pull request.
 
+## Security
+
+The generate step runs the commands of the repository with all the rights of the job. The
+Action removes the variables of the OIDC requests from its environment. The commands can still
+read them in the environment of the parent process, and they can use sudo on a runner of
+GitHub. Put no step that uses a secret after the Action in the same job. A pull request of a
+fork runs in the fork, with the rights of the fork.
+
 ## printdeck.yml
 
 ```yaml
@@ -157,6 +165,7 @@ docs:                           # optional: the PDFs of the project, for the pro
         profile: taz-workhorse-se/pla-0.20-standard
         files: [bittle_pi_addon/stl/print/pod_door.stl]
   ```
+- `prebuilt`: a `.cbddlp`, `.ctb` or G-code (`.gcode`, `.gco`, `.g`) file, at most 200 MB.
 - `files`: STL or 3MF. A 3MF file keeps the Cura settings of its objects, for example a support
   blocker (`cura:anti_overhang_mesh`).
 - `settings`: Cura settings of the part. A setting that Cura allows for each mesh (for example

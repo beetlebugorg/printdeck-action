@@ -4,6 +4,7 @@ The values come from a slice of the Cura app 5.13 with the same profile (the pod
 bittlex, PLA 0.10 Fine, roll 4). A slice with CuraEngine runs only when CURAENGINE is set.
 """
 
+import json
 import os
 import struct
 import tempfile
@@ -130,6 +131,126 @@ class Slice(unittest.TestCase):
         self.assertGreater(f["metres"], 0.1)
         self.assertAlmostEqual((f["minx"] + f["maxx"]) / 2, 140, delta=1)  # the middle of the bed
         self.assertIn(";Printdeck title: Cube", open(out).read(2000))
+
+
+def profile_copy():
+    """A copy of the test profile in a new folder, and the content of its cura.json."""
+    import json
+    import shutil
+    d = os.path.join(tempfile.mkdtemp(), "taz")
+    shutil.copytree(PROFILE, d)
+    return d, json.load(open(os.path.join(d, "cura.json")))
+
+
+def write_meta(d, meta):
+    import json
+    with open(os.path.join(d, "cura.json"), "w") as f:
+        json.dump(meta, f)
+
+
+class ProfilePaths(unittest.TestCase):
+    def test_paths_stay_in_the_profile(self):
+        d, meta = profile_copy()
+        c.build(d, "pla-0.10-fine", "roll-4", {})
+        for bad in ("/proc/self/environ", "../taz/quality/draft.inst.cfg", "quality/../../x", "", "a\nb"):
+            m = json.loads(json.dumps(meta))
+            m["profiles"]["pla-0.10-fine"]["quality_changes"] = bad
+            write_meta(d, m)
+            with self.assertRaises(c.ProfileError, msg=bad):
+                c.build(d, "pla-0.10-fine", "roll-4", {})
+        for bad in ("../../x", "/etc/x", "a/b"):
+            m = json.loads(json.dumps(meta))
+            m["machine"] = bad
+            write_meta(d, m)
+            with self.assertRaises(c.ProfileError, msg=bad):
+                c.build(d, "pla-0.10-fine", "roll-4", {})
+
+    def test_links_out_of_the_profile(self):
+        outside = os.path.join(tempfile.mkdtemp(), "secret.inst.cfg")
+        open(outside, "w").write("SECRET=1\n")
+        for link in ("quality/draft.inst.cfg", "cura.json", "definitions"):
+            d, _ = profile_copy()
+            target = os.path.join(d, link)
+            import shutil
+            shutil.rmtree(target) if os.path.isdir(target) else os.remove(target)
+            os.symlink(outside if link != "definitions" else os.path.dirname(outside), target)
+            with self.assertRaises(c.ProfileError, msg=link):
+                c.build(d, "pla-0.10-fine", "roll-4", {})
+
+    def test_no_file_text_in_the_error(self):
+        d, meta = profile_copy()
+        open(os.path.join(d, "quality", "bad.inst.cfg"), "w").write("SECRET=hunter2\n")
+        meta["profiles"]["pla-0.10-fine"]["quality"] = "quality/bad.inst.cfg"
+        write_meta(d, meta)
+        with self.assertRaises(c.ProfileError) as e:
+            c.build(d, "pla-0.10-fine", "roll-4", {})
+        self.assertNotIn("hunter2", str(e.exception))
+        self.assertIn("MissingSectionHeaderError", str(e.exception))
+        self.assertIsNone(e.exception.__cause__)
+        self.assertTrue(e.exception.__suppress_context__)
+
+
+class OneLine(unittest.TestCase):
+    def test_names_add_no_lines_to_the_gcode(self):
+        g, e, mat, _ = c.build(PROFILE, "pla-0.10-fine", "roll-4", USER)
+        gs, _ = c.engine_settings(g, e, "job\nG28\r\nM104 S300 x", mat)
+        self.assertIn("M117 job G28  M104 S300 x", gs["machine_start_gcode"])
+        out = os.path.join(tempfile.mkdtemp(), "a.gcode")
+        open(out, "w").write(";FLAVOR:Marlin\nG1 X1\n")
+        c.write_header(out, "Gcode header after slicing: ;FLAVOR:Marlin\n", [";Printdeck title: A\nG28\rM104 S300"])
+        self.assertEqual(open(out).read().split("\n"), [";FLAVOR:Marlin", ";Printdeck title: A G28 M104 S300", "G1 X1", ""])
+
+
+class FormulaLimits(unittest.TestCase):
+    def value(self, expr):
+        return eval(c.Formula(expr).code, dict(c.FUNCTIONS))
+
+    def test_large_values(self):
+        for bad in ("10**10**9", "2**100000", "[0]*10**10", "'x'*10**9", "10**9*'x'", "1 << 10**9",
+                    "'%099999999d' % 1", "sum([[0]*10000]*10000, [])", "(10**100)**100"):
+            with self.assertRaises(ValueError, msg=bad):
+                self.value(bad)
+
+    def test_refused_parts(self):
+        for bad in ("math.factorial(10**8)", "math.comb(10**8, 5000)", "math.prod([10**9] * 9999)",
+                    "[x for x in [1] for y in [2]]", "[[y for y in [1]] for x in [2]]", "sum(sum(y for y in [1]) for x in [2])"):
+            with self.assertRaises(ValueError, msg=bad):
+                c.Formula(bad)
+
+    def test_normal_values(self):
+        self.assertEqual(self.value("2 ** 10 + 3 * 4 - 7 % 3"), 1035)
+        self.assertEqual(self.value("[1, 2] * 2 + [3]"), [1, 2, 1, 2, 3])
+        self.assertEqual(self.value("'a' + 'b' * 2"), "abb")
+        self.assertEqual(self.value("sum(x * 2 for x in [1, 2, 3])"), 12)
+        self.assertAlmostEqual(self.value("0.5 ** 2 * 1.5"), 0.375)
+
+
+class ThreeMFLimits(unittest.TestCase):
+    def write(self, objects, build):
+        p = os.path.join(tempfile.mkdtemp(), "part.3mf")
+        ns = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+        with zipfile.ZipFile(p, "w") as z:
+            z.writestr("3D/3dmodel.model", f'<model xmlns="{ns}"><resources>{objects}</resources><build>{build}</build></model>')
+        return p
+
+    TRI = ('<object id="1" type="model"><mesh><vertices><vertex x="0" y="0" z="0"/><vertex x="1" y="0" z="0"/>'
+           '<vertex x="0" y="1" z="0"/></vertices><triangles><triangle v1="0" v2="1" v3="2"/></triangles></mesh></object>')
+
+    def chain(self, n, fan=1):
+        obs = [self.TRI]
+        for i in range(2, n + 2):
+            comps = "".join(f'<component objectid="{i - 1}"/>' for _ in range(fan))
+            obs.append(f'<object id="{i}" type="model"><components>{comps}</components></object>')
+        return self.write("".join(obs), f'<item objectid="{n + 1}"/>')
+
+    def test_limits(self):
+        self.assertEqual(len(c.read_3mf(self.chain(10))[0]), 1)
+        for p in (self.chain(30),  # too deep
+                  self.chain(15, fan=4),  # 4**15 copies of the mesh
+                  self.write('<object id="1" type="model"><components><component objectid="1"/></components></object>',
+                             '<item objectid="1"/>')):  # a loop
+            with self.assertRaises(SystemExit):
+                c.read_3mf(p)
 
 
 if __name__ == "__main__":
