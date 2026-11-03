@@ -141,8 +141,12 @@ parts:
     description: |              # optional: a few sentences about the part
       The plate under the pod. Print it in grey resin.
 cover: docs/img/render.png      # optional: a PNG or JPEG picture of the project, at most 5 MB
-materials:                      # optional: a shop link for each material of the parts
+materials:                      # optional: shop links for each material of the parts
   roll-4: {buy: https://www.example-shop.com/black-pla}
+  roll-3:
+    buy:                        # or up to 4 links with labels: the first is the material you use
+      2.85 mm: https://www.example-shop.com/navy-pla-285
+      1.75 mm: https://www.example-shop.com/navy-pla-175
 docs:                           # optional: the PDFs of the project, for the project page
   - name: Build guide
     file: bittle_pi_addon/bittle_pi_addon_guide.pdf
@@ -184,8 +188,10 @@ docs:                           # optional: the PDFs of the project, for the pro
   the part on the tab, at most 80 characters, for example "The case". A change of these fields does not mark the part "Changed", and does not
   change its digest.
 - `materials`: a map from the `material` of the parts (for example `roll-4` or `Grey resin`) to
-  `buy`, the https address of the shop page of that filament or resin. The project pages show a
-  Reorder link at the material, so people can buy the same material. The link changes no plate
+  `buy`, the https address of the shop page of that filament or resin, or a map of up to 4
+  labels (at most 20 characters, for example the diameters) to addresses, with the material of
+  the project first. The project pages show a Reorder link at the material, so people can buy the
+  same material. The link changes no plate
   and no digest.
 - `cover`: a picture of the project, for example a render. The cover of the newest plan of the
   default branch is the picture of the project in the project lists. A plan of the default

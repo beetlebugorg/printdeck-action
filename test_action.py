@@ -263,6 +263,15 @@ class Materials(unittest.TestCase):
         part = cfg["parts"][0]
         self.assertEqual(pa.material_url(cfg, part), "https://www.matterhackers.com/store/l/navy-pla?x=1")
         self.assertEqual(pa.material_url(self.config(""), part), "")
+        cfg = self.config("materials:\n  roll-3:\n    buy:\n      2.85 mm: https://shop.example/a\n      1.75 mm: https://shop.example/b\n")
+        self.assertEqual(pa.material_links(cfg, cfg["parts"][0]),
+                         [{"label": "2.85 mm", "url": "https://shop.example/a"}, {"label": "1.75 mm", "url": "https://shop.example/b"}])
+        self.assertEqual(pa.material_url(cfg, cfg["parts"][0]), "https://shop.example/a")
+        for bad in ("materials:\n  roll-3:\n    buy: {a: http://shop.example/a}\n",
+                    "materials:\n  roll-3:\n    buy: {}\n",
+                    "materials:\n  roll-3:\n    buy: {'" + "x" * 21 + "': https://shop.example/a}\n"):
+            with self.assertRaises(SystemExit, msg=bad):
+                self.config(bad)
 
 
 class Cover(unittest.TestCase):

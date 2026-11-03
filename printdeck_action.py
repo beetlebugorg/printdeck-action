@@ -305,8 +305,19 @@ def check_materials(cfg, path):
         one_line(name, f"the material {name!r}")
         if not isinstance(m, dict) or set(m) - {"buy"}:
             fail(f"the material {name!r} of {path} has only buy: the address of a shop page")
-        if "buy" in m:
-            check_shop_url(m["buy"], f"the shop link of {name!r}")
+        buy = m.get("buy")
+        if isinstance(buy, dict):
+            # Labels for the links, for example the diameters: the first is the material of the
+            # project.
+            if not 1 <= len(buy) <= 4:
+                fail(f"buy of the material {name!r} has 1 to 4 links")
+            for label, u in buy.items():
+                one_line(label, f"a label of the shop links of {name!r}")
+                if not str(label).strip() or len(str(label)) > 20:
+                    fail(f"a label of the shop links of {name!r} has 1 to 20 characters: {label!r}")
+                check_shop_url(u, f"the shop link {label!r} of {name!r}")
+        elif buy is not None:
+            check_shop_url(buy, f"the shop link of {name!r}")
 
 
 def check_shop_url(u, what):
@@ -317,10 +328,20 @@ def check_shop_url(u, what):
         fail(f"{what} is not an https address: {u!r}")
 
 
-def material_url(cfg, part):
-    """The shop link of the material of the part, or ""."""
+def material_links(cfg, part):
+    """The shop links of the material of the part: [{"label", "url"}], the material of the project
+    first. A single link has no label."""
     m = (cfg.get("materials") or {}).get(str(part.get("material", ""))) or {}
-    return str(m.get("buy", ""))
+    buy = m.get("buy")
+    if isinstance(buy, dict):
+        return [{"label": str(k).strip(), "url": str(v)} for k, v in buy.items()]
+    return [{"label": "", "url": str(buy)}] if buy else []
+
+
+def material_url(cfg, part):
+    """The shop link of the material of the project for the part, or ""."""
+    links = material_links(cfg, part)
+    return links[0]["url"] if links else ""
 
 
 def check_assemblies(cfg, path):
@@ -834,8 +855,10 @@ def plan(config_path):
             entry["models"].append(name)
             models[name] = os.path.join(tmp, name)
         entry["material_name"], entry["material_color"] = material_info(p)
-        if material_url(cfg, p):
-            entry["material_url"] = material_url(cfg, p)
+        links = material_links(cfg, p)
+        if links:
+            entry["material_url"] = links[0]["url"]
+            entry["material_links"] = links
         entry["digest"] = part_digest(p)
         (bx, by), margin = bed_and_margin(p)
         entry.update({"size_x": round(sx, 2), "size_y": round(sy, 2), "size_z": round(sz, 2), "bed_x": bx, "bed_y": by,
