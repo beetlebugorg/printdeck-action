@@ -237,6 +237,34 @@ class Docs(unittest.TestCase):
             pa.plan_docs(self.config("docs:\n  - {name: Guide, file: docs/guide.pdf}\n"), self.dir)
 
 
+class Materials(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.cwd = os.getcwd()
+        os.chdir(self.dir)
+        open("a.stl", "w").write("x")
+
+    def tearDown(self):
+        os.chdir(self.cwd)
+
+    def config(self, mats):
+        open("printdeck.yml", "w").write("parts:\n  - {name: A, files: [a.stl], printer: taz, profile: p/q, material: roll-3}\n" + mats)
+        return pa.load_config("printdeck.yml")
+
+    def test_checks(self):
+        for mats in ("materials: [a]\n", "materials:\n  roll-3: {buy: http://shop.example/x}\n",
+                     "materials:\n  roll-3: {buy: 'javascript:alert(1)'}\n", "materials:\n  roll-3: {buy: https://localhost/x}\n",
+                     "materials:\n  roll-3: {price: 3}\n", "materials:\n  roll-3: {buy: \"https://shop.example/a\\nb\"}\n"):
+            with self.assertRaises(SystemExit, msg=mats):
+                self.config(mats)
+
+    def test_url(self):
+        cfg = self.config("materials:\n  roll-3: {buy: 'https://www.matterhackers.com/store/l/navy-pla?x=1'}\n")
+        part = cfg["parts"][0]
+        self.assertEqual(pa.material_url(cfg, part), "https://www.matterhackers.com/store/l/navy-pla?x=1")
+        self.assertEqual(pa.material_url(self.config(""), part), "")
+
+
 class Cover(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()

@@ -274,6 +274,7 @@ def load_config(path):
             fail(f"the cover of {path} is a PNG or JPEG file")
         inside(cover, "the cover")
     check_assemblies(cfg, path)
+    check_materials(cfg, path)
     return cfg
 
 
@@ -287,6 +288,39 @@ COLOR = re.compile(r"#[0-9a-fA-F]{6}")
 
 def is_text(v, most):
     return isinstance(v, str) and 0 < len(v.strip()) <= most
+
+
+# The materials: a shop link for each material of the parts, so that people can buy the same
+# filament or resin. The project pages show a Reorder link at the material.
+MAX_URL = 500
+
+
+def check_materials(cfg, path):
+    mats = cfg.get("materials")
+    if mats is None:
+        return
+    if not isinstance(mats, dict) or len(mats) > 50:
+        fail(f"materials of {path} is a map of at most 50 materials, by the name in material of the parts")
+    for name, m in mats.items():
+        one_line(name, f"the material {name!r}")
+        if not isinstance(m, dict) or set(m) - {"buy"}:
+            fail(f"the material {name!r} of {path} has only buy: the address of a shop page")
+        if "buy" in m:
+            check_shop_url(m["buy"], f"the shop link of {name!r}")
+
+
+def check_shop_url(u, what):
+    """Refuses u when it is not an https address with a host."""
+    u = str(u)
+    m = re.match(r"^https://([A-Za-z0-9.-]+)(?::[0-9]+)?(?:[/?#][^\s]*)?$", u)
+    if len(u) > MAX_URL or not m or "." not in m.group(1) or CONTROL.search(u):
+        fail(f"{what} is not an https address: {u!r}")
+
+
+def material_url(cfg, part):
+    """The shop link of the material of the part, or ""."""
+    m = (cfg.get("materials") or {}).get(str(part.get("material", ""))) or {}
+    return str(m.get("buy", ""))
 
 
 def check_assemblies(cfg, path):
@@ -800,6 +834,8 @@ def plan(config_path):
             entry["models"].append(name)
             models[name] = os.path.join(tmp, name)
         entry["material_name"], entry["material_color"] = material_info(p)
+        if material_url(cfg, p):
+            entry["material_url"] = material_url(cfg, p)
         entry["digest"] = part_digest(p)
         (bx, by), margin = bed_and_margin(p)
         entry.update({"size_x": round(sx, 2), "size_y": round(sy, 2), "size_z": round(sz, 2), "bed_x": bx, "bed_y": by,
