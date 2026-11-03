@@ -182,8 +182,13 @@ docs:                           # optional: the PDFs of the project, for the pro
   name of a part of `parts`, with its variant: "Door (fine)"), or a `name` for a model with no
   part, for example a bought display. An item of a part has the name and the material color of
   the part, and `name` and `color` can change them. `color` is "#rrggbb". `explode` is the
-  direction of the item in the exploded view: 3 numbers, not all 0. The assemblies change no
-  plate and no digest.
+  direction in which the item comes off in the exploded view: 3 numbers, not all 0. An item with
+  no `explode` stays in place, for example the base. List the items in the order of the assembly:
+  the exploded view takes them off one by one from the last, and finds the distance itself. An
+  item waits until no wall of another item is in its way, and when a wall blocks its direction,
+  it tries the same direction turned up. Items next to each other with the same `explode` move
+  together, for example the inserts of a part. Give each kind of screw its own file and its own
+  direction along its axis. The assemblies change no plate and no digest.
 
   ```yaml
   assemblies:
