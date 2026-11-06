@@ -78,6 +78,11 @@ class Lines(unittest.TestCase):
         self.assertAlmostEqual(x, 24)
         self.assertAlmostEqual(y, 13)
         self.assertAlmostEqual(z, 1.5)
+        # A turn of 90 degrees: the point (4, -2) of the shifted mesh is at (2, 4) after the turn.
+        place["turn"] = 90.0
+        x, y, _ = g.to_file((150 + 1.01 * 2, 135 + 1.01 * 4, 1.5), place)
+        self.assertAlmostEqual(x, 24)
+        self.assertAlmostEqual(y, 13)
 
     def test_needs_model(self):
         d = tempfile.mkdtemp()

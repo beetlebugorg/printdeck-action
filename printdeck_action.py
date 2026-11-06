@@ -41,6 +41,7 @@ except ImportError:  # the mode processes reads no YAML, and runs before the ins
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import curaslice  # noqa: E402
+import platepack  # noqa: E402
 import gcodemodel  # noqa: E402
 import resinslice  # noqa: E402
 
@@ -984,12 +985,17 @@ def plan(config_path):
             path, quality = profile_of(p)
             entry["profile"] = f"{os.path.basename(path)}/{quality}@{curaslice.profile_version(path)}"
         sx = sy = sz = 0.0
+        outline = None
         for j, f in enumerate(p["files"]):
             if not os.path.exists(f):
                 fail(f"{label(p)}: no file {f}")
             name = f"part{i + 1}-{j + 1}.stl"
             x, y, z = model_stl(f, os.path.join(tmp, name))
             sx, sy, sz = max(sx, x), max(sy, y), max(sz, z)
+            # The outline for the layout of the plan page (platepack): with more files, the
+            # largest value of each direction.
+            o = platepack.outline([(q[0], q[1]) for t in curaslice.read_stl(os.path.join(tmp, name)) for q in t])
+            outline = o if outline is None else [max(u, v) for u, v in zip(outline, o)]
             entry["models"].append(name)
             models[name] = os.path.join(tmp, name)
         entry["material_name"], entry["material_color"] = material_info(p)
@@ -1003,6 +1009,8 @@ def plan(config_path):
         (bx, by), margin = bed_and_margin(p)
         entry.update({"size_x": round(sx, 2), "size_y": round(sy, 2), "size_z": round(sz, 2), "bed_x": bx, "bed_y": by,
                       "margin": round(margin, 2)})
+        if outline is not None:
+            entry["outline"] = outline
         manifest["parts"].append(entry)
         why = changed.get((p["name"], p["variant"]))
         log(f"  {label(p)}: {sx:.0f} x {sy:.0f} x {sz:.0f} mm" + (f", changed: {', '.join(why)}" if why else ""))
