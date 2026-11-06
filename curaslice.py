@@ -36,6 +36,10 @@ import sys
 import tempfile
 import xml.etree.ElementTree as ET
 
+# platepack is next to this file. python3 -I does not put the folder of the script on the path.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import platepack  # noqa: E402
+
 
 # The parts of Python that the formulas of Cura use. A formula with any other part (an attribute
 # other than math.<name>, a name with "__", a lambda, a call of another function) does not run:
@@ -729,14 +733,41 @@ def bounds(triangles):
     return min(xs), max(xs), min(ys), max(ys), min(zs), max(zs)
 
 
+def read_stl(path):
+    """The triangles of an STL file (binary or text): ((x, y, z), (x, y, z), (x, y, z))."""
+    import struct
+    data = open(path, "rb").read()
+    n = struct.unpack_from("<I", data, 80)[0] if len(data) >= 84 else 0
+    out = []
+    if len(data) == 84 + 50 * n:
+        for i in range(n):
+            v = struct.unpack_from("<12f", data, 84 + 50 * i)
+            out.append((v[3:6], v[6:9], v[9:12]))
+    else:
+        vs = [tuple(float(x) for x in m.groups()) for m in re.finditer(rb"vertex\s+(\S+)\s+(\S+)\s+(\S+)", data)]
+        out = [tuple(vs[i:i + 3]) for i in range(0, len(vs) - 2, 3)]
+    if not out:
+        raise SystemExit(f"{path}: no triangles")
+    return out
+
+
 def objects_of(files, tmp):
-    """The objects to slice. A plain object is (STL path, None). A 3MF build item is a group:
-    (list of (STL path, Cura settings), its size). The group goes to the middle of the bed and
-    onto the bed, with the same offset for each mesh, as the Cura app places it."""
+    """The objects to slice. An object is a group: (list of (STL path, Cura settings), its size).
+    A plain STL file is a group of one mesh, and a 3MF build item a group of its meshes. The
+    group goes to the middle of the bed and onto the bed, with the same offset for each mesh, as
+    the Cura app places it. GROUP_OUTLINE has the outline of each group for the layout."""
     out = []
     for f in files:
         if not f.lower().endswith(".3mf"):
-            out.append((f, None))
+            tris = read_stl(f)
+            x0, x1, y0, y1, z0, _ = bounds(tris)
+            dx, dy, dz = -(x0 + x1) / 2, -(y0 + y1) / 2, -z0
+            p = os.path.join(tmp, f"{os.path.splitext(os.path.basename(f))[0]}-{len(out)}.stl")
+            write_stl(p, tris, dx, dy, dz)
+            meshes = [(p, {})]
+            out.append((meshes, (x1 - x0, y1 - y0)))
+            GROUP_SHIFT[id(meshes)] = (dx, dy, dz)
+            GROUP_OUTLINE[id(meshes)] = platepack.outline([(q[0], q[1]) for t in tris for q in t])
             continue
         for i, item in enumerate(read_3mf(f)):
             x0, x1, y0, y1, z0, _ = bounds([t for m in item for t in m["triangles"]])
@@ -748,11 +779,23 @@ def objects_of(files, tmp):
                 meshes.append((p, m["settings"]))
             out.append((meshes, (x1 - x0, y1 - y0)))
             GROUP_SHIFT[id(meshes)] = (dx, dy, dz)
+            # The outline is of the meshes that print, about the middle of their box, as the plan
+            # run makes it (model_stl): a support blocker can be out of the part. GROUP_OFFSET is
+            # that middle in the coordinates of the group.
+            pts = [(q[0] + dx, q[1] + dy) for m in item if str(m["settings"].get("anti_overhang_mesh", "")).lower() != "true"
+                   for t in m["triangles"] for q in t]
+            if pts:
+                GROUP_OUTLINE[id(meshes)] = platepack.outline(pts)
+                xs, ys = [q[0] for q in pts], [q[1] for q in pts]
+                GROUP_OFFSET[id(meshes)] = ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2)
     return out
 
 
-# The shift that objects_of gives to the meshes of each group, by id() of its list of meshes.
+# The shift that objects_of gives to the meshes of each group, the outline of the group
+# (platepack), and the middle of the outline in the group, by id() of its list of meshes.
 GROUP_SHIFT = {}
+GROUP_OUTLINE = {}
+GROUP_OFFSET = {}
 
 
 def stl_size(path):
@@ -776,27 +819,33 @@ def stl_size(path):
 
 
 def layout(meshes, gs):
-    """The places of the objects (from objects_of): (x, y) offsets from the middle of the bed.
-    The objects go in rows, with room for the brim or the skirt of each, and the grid is at the
-    middle."""
+    """The places of the objects (from objects_of): (x, y, k) for each, the offset from the
+    middle of the bed and the turn in directions of platepack. platepack.plate places them, with
+    room for the brim or the skirt of each on the bed. One object goes to the middle."""
     if len(meshes) == 1:
-        return [(meshes[0], (0.0, 0.0))]
-    margin = plate_margin(gs)
-    sizes = [size or stl_size(obj) for obj, size in meshes]
-    bw = float(gs.get("machine_width")) - 2 * 10
-    bd = float(gs.get("machine_depth")) - 2 * 10
-    cw = max(w for w, _ in sizes) + 2 * margin
-    cd = max(d for _, d in sizes) + 2 * margin
-    cols = max(1, int(bw // cw))
-    rows = math.ceil(len(meshes) / cols)
-    if rows * cd > bd:
-        fit = cols * max(1, int(bd // cd))
+        return [(meshes[0], (0.0, 0.0, 0))]
+    outlines = [GROUP_OUTLINE.get(id(obj)) or platepack.rect_outline(*size) for obj, size in meshes]
+    bed = (float(gs.get("machine_width")), float(gs.get("machine_depth")))
+    places, fit = platepack.plate(outlines, bed, plate_margin(gs))
+    if places is None:
         raise SystemExit(f"{len(meshes)} objects do not fit on the bed: {fit} fit")
-    cols = min(cols, len(meshes))
     out = []
-    for i, m in enumerate(meshes):
-        r, c = divmod(i, cols)
-        out.append((m, ((c - (cols - 1) / 2) * cw, ((rows - 1) / 2 - r) * cd)))
+    for (obj, size), (x, y, k) in zip(meshes, places):
+        # platepack places the middle of the outline. The group goes by its own reference point.
+        ox, oy = GROUP_OFFSET.get(id(obj), (0.0, 0.0))
+        t = math.radians(platepack.turn_degrees(k))
+        out.append(((obj, size), (x - (ox * math.cos(t) - oy * math.sin(t)), y - (ox * math.sin(t) + oy * math.cos(t)), k)))
+    return out
+
+
+def turned_stl(path, k, n):
+    """A copy of the STL file path turned by k directions of platepack about Z, through the
+    point 0, 0: the reference point of the group. n makes the name of the copy unique."""
+    t = math.radians(platepack.turn_degrees(k))
+    c, s = math.cos(t), math.sin(t)
+    tris = [tuple((x * c - y * s, x * s + y * c, z) for x, y, z in tri) for tri in read_stl(path)]
+    out = f"{os.path.splitext(path)[0]}-turn{n}.stl"
+    write_stl(out, tris)
     return out
 
 
@@ -860,8 +909,8 @@ def slice_files(meshes, gs, es, out, defs_dir, count=1, lines=(), resolve=None):
         if v is not None:
             args += ["-s", f"{k}={engine_text(v)}"]
     # Each object goes to extruder 0. One object goes to the middle of the bed, as the Cura app
-    # places one part. More objects go in a grid around the middle. A plain STL file is centered
-    # by CuraEngine; a group of a 3MF file is centered already, with its meshes in place.
+    # places one part. layout places more objects, and can turn them. Each group of objects_of is
+    # centered already, with its meshes in place.
     tmp = tempfile.mkdtemp(prefix="curaslice-meshes-")
     pairs = [m if isinstance(m, tuple) else (m, {}) for m in meshes]
     objs = []
@@ -871,16 +920,12 @@ def slice_files(meshes, gs, es, out, defs_dir, count=1, lines=(), resolve=None):
     places = layout([o for o, _ in objs], gs)
     global LAST_PLACES
     LAST_PLACES = []
-    for ((obj, size), (x, y)), (_, extra) in zip(places, objs):
-        if size is not None:
-            LAST_PLACES.append({"shift": GROUP_SHIFT.get(id(obj), (0.0, 0.0, 0.0)), "position": (x, y)})
-        if size is None:
-            args += ["-l", os.path.abspath(obj), "-s", "extruder_nr=0", "-s", "center_object=True",
-                     "-s", f"mesh_position_x={x:.3f}", "-s", f"mesh_position_y={y:.3f}"]
-            for k, v in (resolve(extra) if resolve else extra).items():
-                args += ["-s", f"{k}={engine_text(v)}"]
-            continue
+    for n, (((obj, size), (x, y, turn)), (_, extra)) in enumerate(zip(places, objs)):
+        LAST_PLACES.append({"shift": GROUP_SHIFT.get(id(obj), (0.0, 0.0, 0.0)), "position": (x, y),
+                            "turn": platepack.turn_degrees(turn)})
         for path, settings in obj:
+            if turn:
+                path = turned_stl(path, turn, n)
             args += ["-l", path, "-s", "extruder_nr=0", "-s", f"mesh_position_x={x:.3f}", "-s", f"mesh_position_y={y:.3f}"]
             # The settings of the mesh in its 3MF file are on top of the settings of the part.
             if resolve:
@@ -902,8 +947,9 @@ def slice_files(meshes, gs, es, out, defs_dir, count=1, lines=(), resolve=None):
 
 # LAST_WARNINGS are the warnings of CuraEngine at the last slice, for the log of the Action.
 LAST_WARNINGS = []
-# LAST_PLACES has an entry for each 3MF group of the last slice: the shift of objects_of and the
-# mesh position on the bed. gcodemodel uses them to put G-code back in the coordinates of the file.
+# LAST_PLACES has an entry for each object of the last slice: the shift of objects_of, the mesh
+# position on the bed, and the turn in degrees about Z. gcodemodel uses them to put G-code back in
+# the coordinates of the file.
 LAST_PLACES = []
 
 

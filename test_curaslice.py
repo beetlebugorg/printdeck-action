@@ -83,19 +83,61 @@ class Formulas(unittest.TestCase):
         self.assertEqual(eval(c.Formula("max(1, math.ceil(2.5))").code, {"math": __import__("math"), "max": max}), 3)
 
 
+def disc(path, d, n=96, h=5.0):
+    """A binary STL of a disc of diameter d mm, height h, with its middle at 100, 50."""
+    import math
+    r = d / 2
+    ring = [(100 + r * math.cos(2 * math.pi * i / n), 50 + r * math.sin(2 * math.pi * i / n)) for i in range(n)]
+    tris = []
+    for i in range(n):
+        a, b = ring[i], ring[(i + 1) % n]
+        tris += [((100, 50, 0), (b[0], b[1], 0), (a[0], a[1], 0)), ((100, 50, h), (a[0], a[1], h), (b[0], b[1], h)),
+                 ((a[0], a[1], 0), (b[0], b[1], 0), (b[0], b[1], h)), ((a[0], a[1], 0), (b[0], b[1], h), (a[0], a[1], h))]
+    c.write_stl(path, tris)
+
+
 class Layout(unittest.TestCase):
-    def test_grid_and_limit(self):
+    GS = {"machine_width": 280, "machine_depth": 280, "adhesion_type": "brim", "brim_line_count": 12, "line_width": 0.5}
+
+    def test_cubes_and_limit(self):
         tmp = tempfile.mkdtemp()
         p = os.path.join(tmp, "cube.stl")
         cube(p, 20)
-        gs = {"machine_width": 280, "machine_depth": 280, "adhesion_type": "brim", "brim_line_count": 12, "line_width": 0.5}
-        places = c.layout([(p, None)] * 4, gs)
-        xs = sorted(x for _, (x, _) in places)
-        self.assertEqual(len(set(xs)), 4)
-        self.assertAlmostEqual(sum(xs), 0, places=6)  # the grid is at the middle
+        places = c.layout(c.objects_of([p] * 4, tmp), self.GS)
+        pts = [(x, y) for _, (x, y, _) in places]
+        self.assertEqual(len(set(pts)), 4)
+        # The objects keep 2 mm between them, and their box is at the middle.
+        for i in range(4):
+            for j in range(i + 1, 4):
+                self.assertGreaterEqual(max(abs(pts[i][0] - pts[j][0]), abs(pts[i][1] - pts[j][1])), 22 - 1e-6)
+        self.assertAlmostEqual(min(x for x, _ in pts) + max(x for x, _ in pts), 0, places=2)
+        self.assertAlmostEqual(min(y for _, y in pts) + max(y for _, y in pts), 0, places=2)
         with self.assertRaises(SystemExit) as e:
-            c.layout([(p, None)] * 200, gs)
+            c.layout(c.objects_of([p] * 200, tmp), self.GS)
         self.assertIn("fit", str(e.exception))
+
+    def test_two_discs_on_the_diagonal(self):
+        # Two discs of 157 and 151 mm with a 10-line brim: they fit only in opposite corners.
+        tmp = tempfile.mkdtemp()
+        a, b = os.path.join(tmp, "a.stl"), os.path.join(tmp, "b.stl")
+        disc(a, 157)
+        disc(b, 151)
+        gs = dict(self.GS, brim_line_count=10)
+        (_, (x1, y1, _)), (_, (x2, y2, _)) = c.layout(c.objects_of([a, b], tmp), gs)
+        self.assertGreaterEqual(((x1 - x2) ** 2 + (y1 - y2) ** 2) ** 0.5, (157 + 151) / 2 + 2 - 0.2)
+        m = c.plate_margin(gs)
+        for x, y, r in ((x1, y1, 157 / 2), (x2, y2, 151 / 2)):
+            self.assertLessEqual(max(abs(x), abs(y)) + r + m, 140 + 0.2)
+
+    def test_turned_copy(self):
+        tmp = tempfile.mkdtemp()
+        p = os.path.join(tmp, "cube.stl")
+        c.write_stl(p, [((10, 0, 0), (0, 5, 0), (0, 0, 1))])
+        t = c.turned_stl(p, 16, 0)  # 90 degrees
+        (a, b, d), = c.read_stl(t)
+        for got, want in zip((a, b, d), ((0, 10, 0), (-5, 0, 0), (0, 0, 1))):
+            for g, w in zip(got, want):
+                self.assertAlmostEqual(g, w, places=4)
 
 
 class ThreeMF(unittest.TestCase):

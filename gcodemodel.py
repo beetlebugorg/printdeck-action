@@ -110,14 +110,20 @@ def joined(lines, tol=1e-3):
 
 def to_file(p, place):
     """A point of the bed in the coordinates of the part file. place has centre, position,
-    shift and scale: CuraEngine puts the shifted meshes at centre + position, and scales them by
-    the shrinkage about the middle of the group."""
+    shift, scale and turn: the slice turns the shifted meshes by turn degrees about Z, and
+    CuraEngine puts them at centre + position, and scales them by the shrinkage about the middle
+    of the group."""
     cx, cy = place["centre"]
     px, py = place["position"]
     dx, dy, dz = place["shift"]
     sxy, sz = place["scale"]
     x, y, z = p
-    return ((x - cx - px) / sxy - dx, (y - cy - py) / sxy - dy, z / sz - dz)
+    u, v = (x - cx - px) / sxy, (y - cy - py) / sxy
+    t = math.radians(place.get("turn") or 0.0)
+    if t:
+        c, s = math.cos(t), math.sin(t)
+        u, v = u * c + v * s, -u * s + v * c
+    return (u - dx, v - dy, z / sz - dz)
 
 
 def box(x0, y0, x1, y1, z, h, w):
