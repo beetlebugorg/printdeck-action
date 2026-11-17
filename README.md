@@ -47,6 +47,7 @@ on:
 permissions:
   contents: read
   id-token: write   # the OIDC token for Printdeck
+  packages: read    # only for parts with "slicer: zslice": the zslice package
 
 jobs:
   plan:
@@ -132,6 +133,7 @@ parts:
     material: roll-4            # a material of the folder
     count: 1                    # copies on one plate
     settings: {support_enable: true, adhesion_type: brim}
+    slicer: zslice              # optional: cura (the default) or zslice, for an FDM part
   - name: Resin plate
     files: [stl/plates/resin_phenom_plate.stl]
     printer: phenom
@@ -256,11 +258,30 @@ The plan run keeps the slice of each part in the cache of GitHub Actions
 (`~/.cache/printdeck-parts`), by the digest of the part. A part that did not change is not sliced
 again.
 
+## zslice
+
+A part with `slicer: zslice` slices with [zslice](https://github.com/beetlebugorg/zslice) in
+place of CuraEngine (`zslicer.py`). The plate is the same: the Action checks the settings and
+places the objects with the Cura stack, then zslice slices the plate as a 3MF file. The settings
+of printdeck.yml stay Cura keys. zslice maps them, and stops on a key that it cannot use. Parts
+with other slicers never share a plate.
+
+- The profile folder needs the zslice profiles next to the Cura stack, in `zslice/`. Make them
+  with `zslice import cura profiles/<folder> -o profiles/<folder>/zslice`. The material is
+  `zslice/filament/<material>.toml`, and the profile is `zslice/project/<profile>.toml`.
+- zslice comes from its npm package on GitHub Packages, at a fixed version, after a check of its
+  SHA-256. No npm install runs. GitHub Packages needs a token for each download: the input
+  `packages-token`, by default the job token with `packages: read`. The Action removes the token
+  from its environment at once, so no program that it starts gets it. It sends the token to
+  npm.pkg.github.com only, and only when a part needs zslice. The cache of GitHub Actions keeps
+  the package.
+
 ## Tests
 
 ```
 python3 -m unittest test_curaslice test_action test_gcodemodel
 CURAENGINE=/path/to/CuraEngine CURAENGINE_LIB=/path/to/libs python3 -m unittest test_curaslice test_gcodemodel   # with a real slice
+ZSLICE=/path/to/package/bin/zslice.mjs python3 -m unittest test_zslicer   # with a real zslice slice
 ```
 
 ## License

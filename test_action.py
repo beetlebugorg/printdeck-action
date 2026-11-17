@@ -237,6 +237,29 @@ class Docs(unittest.TestCase):
             pa.plan_docs(self.config("docs:\n  - {name: Guide, file: docs/guide.pdf}\n"), self.dir)
 
 
+class Slicer(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.cwd = os.getcwd()
+        os.chdir(self.dir)
+        open("a.stl", "w").write("x")
+
+    def tearDown(self):
+        os.chdir(self.cwd)
+
+    def config(self, part):
+        open("printdeck.yml", "w").write("parts:\n  - {name: A, files: [a.stl], profile: p/q, " + part + "}\n")
+        return pa.load_config("printdeck.yml")
+
+    def test_slicer(self):
+        self.assertEqual(pa.slicer_of(self.config("printer: taz")["entries"][0]), "cura")
+        p = self.config("printer: taz, slicer: zslice")["entries"][0]
+        self.assertIs(pa.fdm_slicer(p)[0], pa.zslicer)
+        for bad in ("printer: taz, slicer: prusa", "printer: phenom, slicer: zslice"):
+            with self.assertRaises(SystemExit, msg=bad):
+                self.config(bad)
+
+
 class Materials(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
