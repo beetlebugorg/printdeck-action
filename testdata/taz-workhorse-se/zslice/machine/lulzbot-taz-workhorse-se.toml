@@ -1,0 +1,46 @@
+# Imported from Cura 5.13.0: machine definition lulzbot_taz_workhorse_se.
+name = "LulzBot TAZ Workhorse | SE | 0.5 mm"
+# The highest print speed of the Cura quality profiles. The speeds of
+# the project profiles are ratios of it.
+max_speed = 60
+bed_size_x = 280
+bed_size_y = 280
+max_height = 285
+nozzle_diameter = 0.5
+start_gcode = '''
+; Klipper start: wipe, washer probe and prime line run in the PRINT_START macro
+PRINT_START BED={bed_temp} EXTRUDER={first_layer_nozzle_temp} WIPE={standby_temp} LAYER={first_layer_height} SPEED={first_layer_speed}
+M117 {job_name}'''
+end_gcode = '''
+; Klipper end
+PRINT_END'''
+
+# Cura settings that are not imported (zslice has no such setting yet,
+# or the Cura value is an expression):
+#   machine_name = LulzBot TAZ Workhorse | SE | 0.5 mm
+#   machine_heated_bed = True
+#   machine_center_is_zero = False
+#   machine_gcode_flavor = RepRap (Marlin/Sprinter)
+#   machine_heat_zone_length = 20
+#   machine_max_feedrate_x = 500
+#   machine_max_feedrate_y = 500
+#   machine_max_feedrate_z = 8
+#   machine_max_feedrate_e = 40
+#   machine_max_acceleration_x = 9000
+#   machine_max_acceleration_y = 9000
+#   machine_max_acceleration_z = 100
+#   machine_max_acceleration_e = 1000
+#   machine_acceleration = 3000
+#   machine_nozzle_offset_x = 0
+#   machine_nozzle_offset_y = 0
+#   machine_extruder_start_pos_abs = False
+#   machine_extruder_start_pos_x = 0
+#   machine_extruder_start_pos_y = 0
+#   machine_extruder_end_pos_abs = False
+#   machine_extruder_end_pos_x = 0
+#   machine_extruder_end_pos_y = 0
+#   machine_max_jerk_xy = 5
+
+# The filament diameter of this machine.
+[filament]
+diameter = 2.85

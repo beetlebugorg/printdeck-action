@@ -1,0 +1,80 @@
+# Imported from Cura 5.13.0: quality profile pla-0.10-fine.
+layer_height = 0.1
+first_layer_height = 0.25
+wall_count = 3
+slow_layers = 3
+outer_wall_accel = 500
+inner_wall_accel = 1000
+skin_accel = 1000
+travel_accel = 2500
+first_layer_accel = 500
+top_thickness = 1
+bottom_thickness = 1
+infill_density = 0.2
+infill_pattern = "gyroid"
+seam = "rear"
+support = "off"
+support_angle = 55
+skirt_loops = 2
+retract_min_travel = 3
+# speed_wall_0 = 25 mm/s in Cura.
+outer_wall_speed = 0.417
+# speed_wall_x = 35 mm/s in Cura.
+inner_wall_speed = 0.583
+# speed_topbottom = 30 mm/s in Cura.
+skin_speed = 0.500
+# speed_infill = 50 mm/s in Cura.
+infill_speed = 0.833
+# speed_layer_0 = 18 mm/s in Cura.
+first_layer_speed = 0.300
+first_layer_xy_offset = -0.1
+
+[machine]
+max_accel = 3000
+accel_control = true
+travel_speed = 200
+retract_length = 1.5
+retract_speed = 35
+
+[filament]
+min_layer_time = 8
+fan_boost_time = 0
+
+# Cura settings that are not imported (zslice has no such setting yet,
+# or the Cura value is an expression):
+#   acceleration_print = 1500
+#   jerk_print = 12
+#   material_bed_temp_prepend = False
+#   material_print_temp_prepend = False
+#   material_standby_temperature = 160
+#   infill_before_walls = False
+#   speed_z_hop = 8
+#   prime_tower_min_shell_thickness = 0.5
+#   speed_print = 45
+#   skirt_brim_minimal_length = 200
+#   support_interface_density = 40
+#   support_interface_pattern = triangles
+#   extruder_nr = 0
+#   material_diameter = 2.85
+#   extruders_enabled_count = 1
+#   support_structure = tree
+#   bridge_settings_enabled = True
+#   retraction_combing = noskin
+#   acceleration_wall = 1000
+#   acceleration_roofing = 1000
+#   acceleration_skirt_brim = 1000
+#   bridge_fan_speed = 100
+#   bridge_wall_speed = 20
+#   brim_line_count = 8
+#   brim_location = outside
+#   cool_fan_full_layer = 4
+#   cool_fan_speed_min = 100
+#   retract_at_layer_change = True
+#   skin_angles = [45]
+#   skin_monotonic = True
+#   speed_roofing = 25
+#   speed_travel_layer_0 = 100
+#   speed_wall = 35
+#   wall_0_wipe_dist = 0.4
+#   z_seam_corner = z_seam_corner_inner
+#   z_seam_position = back

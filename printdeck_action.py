@@ -44,6 +44,7 @@ import curaslice  # noqa: E402
 import platepack  # noqa: E402
 import gcodemodel  # noqa: E402
 import resinslice  # noqa: E402
+import zslicer  # noqa: E402
 
 API = os.environ.get("PRINTDECK_API", "https://printdeck.beetlebug.org").rstrip("/")
 # The bed of each printer of printdeck.yml in mm, and its process. A part can name another printer
@@ -244,8 +245,10 @@ def load_config(path):
             fail(f"each part of {path} needs a name, a printer and files (in the part or in each variant)")
         if p.get("variants") is not None and not p.get("variant"):
             fail(f"{p['name']}: each variant needs a name")
-        for k in ("name", "variant", "printer", "process", "material", "profile", "group"):
+        for k in ("name", "variant", "printer", "process", "material", "profile", "group", "slicer"):
             one_line(p.get(k), f"{k} of a part")
+        if p.get("slicer") is not None and (p["slicer"] not in SLICERS or process_of(p) != "fdm"):
+            fail(f"{label(p)}: slicer is {' or '.join(SLICERS)}, for an FDM part")
         key = (p["name"].lower(), p["variant"].lower())
         if key in names:
             fail(f"two parts have the name {label(p)}")
@@ -497,6 +500,21 @@ def plan_cover(cfg):
     return name, (path, ctype)
 
 
+# The slicers of an FDM part: CuraEngine (the default), or zslice (zslicer.py).
+SLICERS = ("cura", "zslice")
+
+
+def slicer_of(part):
+    return part.get("slicer") or "cura"
+
+
+def fdm_slicer(part):
+    """The module that slices the FDM part, and the name of its slicer."""
+    if slicer_of(part) == "zslice":
+        return zslicer, zslicer.NAME
+    return curaslice, "CuraEngine 5.13.0"
+
+
 def process_of(part):
     return part.get("process") or PRINTERS.get(str(part.get("printer", "")).lower(), ("fdm",))[0]
 
@@ -552,6 +570,8 @@ def profile_of(part):
         fail(f"{part['name']}: no profile {part['profile']} in profiles/ ({stack})")
     try:
         curaslice.check_tree(path)
+        if process_of(part) == "fdm" and slicer_of(part) == "zslice":
+            zslicer.profiles(path, quality, part.get("material"))
     except curaslice.ProfileError as e:
         fail(f"{part['name']}: the profile {part['profile']}: {e}")
     return path, quality
@@ -877,12 +897,13 @@ def slice_part(cfg, p, i, commit, tmp):
                  "profile": f"{os.path.basename(path)}/{quality}@{curaslice.profile_version(path)}"}
     else:
         meta_lines = [f";Printdeck title: {label(p)}", f";Printdeck commit: {commit}"]
-        facts = curaslice.slice_plate(path, quality, p.get("material"), [(label(p), p["files"], 1, p.get("settings") or {})], out,
-                                      name=f"{cfg.get('project', 'printdeck')}-{slug(label(p))}", meta=meta_lines)
-        for w in curaslice.LAST_WARNINGS:
-            print(f"::warning title=CuraEngine, {command_data(label(p))}::{command_data(w)}", flush=True)
+        mod, slicer = fdm_slicer(p)
+        facts = mod.slice_plate(path, quality, p.get("material"), [(label(p), p["files"], 1, p.get("settings") or {})], out,
+                                name=f"{cfg.get('project', 'printdeck')}-{slug(label(p))}", meta=meta_lines)
+        for w in mod.LAST_WARNINGS:
+            print(f"::warning title={command_data(slicer.split()[0])}, {command_data(label(p))}::{command_data(w)}", flush=True)
         facts = {k: facts[k] for k in FACT_KEYS if k in facts}
-        facts.update({"seconds": int(facts.get("seconds", 0)), "layers": int(facts.get("layers", 0)), "slicer": "CuraEngine 5.13.0"})
+        facts.update({"seconds": int(facts.get("seconds", 0)), "layers": int(facts.get("layers", 0)), "slicer": slicer})
     log(f"  {label(p)}: sliced in {__import__('time').time() - t0:.1f} s ({clock(int(facts.get('seconds', 0)))})")
     try:
         os.makedirs(PART_CACHE, exist_ok=True)
@@ -1219,6 +1240,9 @@ def do_slice(config_path, job):
         else:
             path, quality = profile_of(first)
             name = f"plate-{n}.gcode"
+            if len({slicer_of(p) for p, _ in parts}) > 1:
+                raise SystemExit(f"plate {n}: its parts have other slicers. Put them on separate plates.")
+            mod, slicer = fdm_slicer(first)
             meta = [f";Printdeck title: {title}", f";Printdeck build: {job['id']}", f";Printdeck commit: {job['commit']}"]
             with group(f"Plate {n} of {total}: {title}"):
                 log(f"Printer {first['printer']}, profile {first['profile']}, material {entry['material_name'] or first.get('material')}")
@@ -1226,19 +1250,19 @@ def do_slice(config_path, job):
                     log(f"  {label(p)} x{c}: {', '.join(p['files'])}" + (f", settings {p['settings']}" if p.get("settings") else ""))
                 t0 = __import__("time").time()
                 try:
-                    facts = curaslice.slice_plate(path, quality, first.get("material"),
-                                                  [(label(p), p["files"], c, p.get("settings") or {}) for p, c in parts],
-                                                  os.path.join(tmp, name), name=f"{cfg.get('project', 'printdeck')}-{n}", meta=meta)
+                    facts = mod.slice_plate(path, quality, first.get("material"),
+                                            [(label(p), p["files"], c, p.get("settings") or {}) for p, c in parts],
+                                            os.path.join(tmp, name), name=f"{cfg.get('project', 'printdeck')}-{n}", meta=meta)
                 except curaslice.ProfileError as e:
                     print(f"::error::{command_data(f'plate {n}: {e}')}", flush=True)
                     raise
                 took = __import__("time").time() - t0
-                for w in curaslice.LAST_WARNINGS:
-                    print(f"::warning title=CuraEngine, plate {n}::{w}", flush=True)
+                for w in mod.LAST_WARNINGS:
+                    print(f"::warning title={command_data(slicer.split()[0])}, plate {n}::{command_data(w)}", flush=True)
                 paths[name] = os.path.join(tmp, name)
                 entry.update({"file": name, "seconds": int(facts.get("seconds", 0)), "grams": facts.get("grams", 0),
                               "layers": int(facts.get("layers", 0)), "layer_height": facts.get("layer_height", 0),
-                              "profile": facts["profile"], "slicer": "CuraEngine 5.13.0"})
+                              "profile": facts["profile"], "slicer": slicer})
                 log(f"Sliced in {took:.1f} s: {clock(entry['seconds'])}, {entry['grams']} g, {entry['layers']} layers of "
                     f"{entry['layer_height']} mm, profile {facts['profile']}")
         data = open(paths[entry["file"]], "rb").read()
@@ -1254,6 +1278,7 @@ def main():
     ap.add_argument("--config", default="printdeck.yml")
     ap.add_argument("--build", default="")
     a = ap.parse_args()
+    zslicer.take_token()
     if a.mode == "plan":
         plan(a.config)
     elif a.mode == "processes" and not a.build:

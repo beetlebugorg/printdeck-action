@@ -1,0 +1,29 @@
+# Imported from Cura 5.13.0: material roll-3 (materials/printdeck_navy.xml.fdm_material).
+name = "MatterHackers PLA Navy"
+color = "#1f2a5a"
+diameter = 2.85
+density = 1.24
+nozzle_temp = 210
+first_layer_nozzle_temp = 210
+bed_temp = 60
+standby_temp = 160
+xy_offset = 0.144
+hole_xy_offset = 0.292
+shrinkage_xy = 1.0031
+fan_speed = 1
+
+# Cura material settings that are not imported:
+#   anti ooze retract position = -4
+#   anti ooze retract speed = 50
+#   break preparation position = -16
+#   break preparation speed = 50
+#   break preparation temperature = 210
+#   break position = -50
+#   break speed = 25
+#   break temperature = 60
+#   flush purge length = 60
+#   maximum park duration = 7200
+#   no load move factor = 0.91
+#   build volume temperature = 28
+#   adhesion tendency = 0
+#   surface energy = 100

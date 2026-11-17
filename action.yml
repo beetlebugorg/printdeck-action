@@ -21,6 +21,12 @@ inputs:
     description: The Printdeck service.
     required: false
     default: https://printdeck.beetlebug.org
+  packages-token:
+    description: >-
+      A token that reads GitHub Packages, for a part with "slicer: zslice". The default is the job
+      token: give the job the permission packages: read. The Action uses it only to get zslice.
+    required: false
+    default: ${{ github.token }}
 
 runs:
   using: composite
@@ -86,6 +92,14 @@ runs:
       shell: bash
       run: bash "$GITHUB_ACTION_PATH/curaengine.sh" "$HOME/.cache/printdeck-curaengine-5.13.0"
 
+    # zslice, for the parts with "slicer: zslice" (zslicer.py gets it, and checks its SHA-256).
+    - name: Cache zslice 0.4.0-beta
+      if: steps.plates.outputs.fdm == 'true' || steps.parts.outputs.fdm == 'true'
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/printdeck-zslice-0.4.0-beta/zslice-0.4.0-beta.tgz
+        key: printdeck-zslice-0.4.0-beta
+
     - name: ${{ inputs.mode == 'slice' && format('Slice the plates of Printdeck build {0}', inputs.build) || 'Send the plan of the parts to Printdeck' }}
       shell: bash
       env:
@@ -94,6 +108,8 @@ runs:
         PRINTDECK_CONFIG: ${{ inputs.config }}
         PRINTDECK_API: ${{ inputs.api }}
         PRINTDECK_STARTED: ${{ steps.plates.outcome == 'success' && '1' || '' }}
+        # printdeck_action.py removes it from the environment at once (zslicer.take_token).
+        PRINTDECK_PACKAGES_TOKEN: ${{ inputs.packages-token }}
       run: |
         export CURAENGINE="$HOME/.cache/printdeck-curaengine-5.13.0/CuraEngine"
         export CURAENGINE_LIB="$HOME/.cache/printdeck-curaengine-5.13.0"
