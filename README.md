@@ -128,7 +128,7 @@ generate:                       # optional: the step that makes the model files
 parts:
   - name: Pod body (screw)
     files: [bittle_pi_addon/stl/print/pod_body_screw.3mf]
-    printer: taz                # taz (FDM, 280 x 280 mm) or phenom (resin, 276 x 155 mm)
+    printer: taz                # taz or x2d (FDM, 280 x 280 and 256 x 256 mm), or phenom (resin, 276 x 155 mm)
     profile: taz-workhorse-se/pla-0.10-fine   # a folder of profiles/ and a profile in it
     material: roll-4            # a material of the folder
     count: 1                    # copies on one plate
@@ -275,6 +275,13 @@ with other slicers never share a plate.
   from its environment at once, so no program that it starts gets it. It sends the token to
   npm.pkg.github.com only, and only when a part needs zslice. The cache of GitHub Actions keeps
   the package.
+
+### The Bambu Lab X2D
+
+A part with `printer: x2d` always slices with zslice. Its profile folder has only `zslice/`, with no
+Cura stack. The part is one file, with `alone: true`. A 3MF file gives each object its filament, so
+a part can print in two colors. Its `settings` are zslice settings, for example
+`project.wall_count: 3`.
 
 ## Tests
 

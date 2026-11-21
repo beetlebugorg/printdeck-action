@@ -255,7 +255,10 @@ class Slicer(unittest.TestCase):
         self.assertEqual(pa.slicer_of(self.config("printer: taz")["entries"][0]), "cura")
         p = self.config("printer: taz, slicer: zslice")["entries"][0]
         self.assertIs(pa.fdm_slicer(p)[0], pa.zslicer)
-        for bad in ("printer: taz, slicer: prusa", "printer: phenom, slicer: zslice"):
+        x2d = self.config("printer: x2d")["entries"][0]
+        self.assertEqual(pa.slicer_of(x2d), "zslice")
+        self.assertIs(pa.fdm_slicer(x2d)[0], pa.zslicer.BAMBU)
+        for bad in ("printer: taz, slicer: prusa", "printer: phenom, slicer: zslice", "printer: x2d, slicer: cura"):
             with self.assertRaises(SystemExit, msg=bad):
                 self.config(bad)
 
