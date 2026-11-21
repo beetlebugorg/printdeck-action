@@ -1021,7 +1021,40 @@ def slice_plate(profile_dir, quality, material, parts, out, name="plate", meta=(
     f["scale"] = (float(es.get("material_shrinkage_percentage_xy") or gs.get("material_shrinkage_percentage_xy") or 100) / 100,
                   float(es.get("material_shrinkage_percentage_z") or gs.get("material_shrinkage_percentage_z") or 100) / 100)
     f["line_width"] = float(es.get("line_width") or gs.get("line_width") or 0.4)
+    f["settings"] = plate_settings(gs, es)
     return f
+
+
+# SETTINGS are the main settings of a slice for the pages of the cloud: the name on the cloud,
+# the key of CuraEngine, and the unit. The cloud shows them with the plate.
+SETTINGS = (
+    ("layer_height", "layer_height", "mm"), ("first_layer_height", "layer_height_0", "mm"),
+    ("nozzle", "machine_nozzle_size", "mm"), ("line_width", "line_width", "mm"),
+    ("walls", "wall_line_count", ""), ("top_layers", "top_layers", ""), ("bottom_layers", "bottom_layers", ""),
+    ("infill", "infill_sparse_density", "%"), ("infill_pattern", "infill_pattern", ""),
+    ("supports", "support_enable", ""), ("support_placement", "support_type", ""),
+    ("adhesion", "adhesion_type", ""), ("nozzle_temp", "material_print_temperature", "°C"),
+    ("bed_temp", "material_bed_temperature", "°C"), ("speed", "speed_print", "mm/s"),
+)
+
+
+def plate_settings(gs, es):
+    """The main settings of the slice (SETTINGS), as text with the unit: the value of the
+    extruder stack, else of the global stack. A setting with no value is not in the result."""
+    out = {}
+    for name, key, unit in SETTINGS:
+        v = es.get(key)
+        if v is None or v == "":
+            v = gs.get(key)
+        if v is None or v == "":
+            continue
+        if isinstance(v, bool) or str(v).lower() in ("true", "false"):
+            v = "on" if str(v).lower() == "true" else "off"
+        elif isinstance(v, float) or re.fullmatch(r"-?\d+\.\d+", str(v)):
+            v = f"{float(v):g}"
+        v = str(v).replace("_", " ")
+        out[name] = f"{v} {unit}".strip() if unit else v
+    return out
 
 
 def plate_margin(gs):

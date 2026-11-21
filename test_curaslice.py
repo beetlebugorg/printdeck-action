@@ -312,3 +312,17 @@ class ThreeMFLimits(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PlateSettingsTest(unittest.TestCase):
+    def test_units_and_order_of_stacks(self):
+        gs = {"layer_height": 0.2, "support_enable": False, "adhesion_type": "brim", "infill_pattern": "grid",
+              "wall_line_count": 2, "speed_print": "60.0"}
+        es = {"material_print_temperature": 215, "infill_sparse_density": 20.0, "wall_line_count": 3, "layer_height": ""}
+        got = c.plate_settings(gs, es)
+        self.assertEqual(got, {"layer_height": "0.2 mm", "walls": "3", "infill": "20 %", "infill_pattern": "grid",
+                               "supports": "off", "adhesion": "brim", "nozzle_temp": "215 °C", "speed": "60 mm/s"})
+
+    def test_names_with_underscores(self):
+        got = c.plate_settings({"support_type": "buildplate", "infill_pattern": "zigzag_lines"}, {})
+        self.assertEqual(got["infill_pattern"], "zigzag lines")
