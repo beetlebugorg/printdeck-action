@@ -49,7 +49,9 @@ import zslicer  # noqa: E402
 API = os.environ.get("PRINTDECK_API", "https://printdeck.beetlebug.org").rstrip("/")
 # The bed of each printer of printdeck.yml in mm, and its process. A part can name another printer
 # with "process" and "bed" in printdeck.yml.
-PRINTERS = {"taz": ("fdm", (280.0, 280.0)), "phenom": ("resin", (276.0, 155.0))}
+PRINTERS = {"taz": ("fdm", (280.0, 280.0)), "x2d": ("fdm", (256.0, 256.0)), "phenom": ("resin", (276.0, 155.0))}
+# The printers that only zslice slices. Their profile folder has no Cura stack.
+ZSLICE_ONLY = {"x2d"}
 
 
 def log(msg):
@@ -249,6 +251,8 @@ def load_config(path):
             one_line(p.get(k), f"{k} of a part")
         if p.get("slicer") is not None and (p["slicer"] not in SLICERS or process_of(p) != "fdm"):
             fail(f"{label(p)}: slicer is {' or '.join(SLICERS)}, for an FDM part")
+        if zslice_only(p) and p.get("slicer") not in (None, "zslice"):
+            fail(f"{label(p)}: the printer {p['printer']} slices with zslice only")
         key = (p["name"].lower(), p["variant"].lower())
         if key in names:
             fail(f"two parts have the name {label(p)}")
@@ -504,12 +508,18 @@ def plan_cover(cfg):
 SLICERS = ("cura", "zslice")
 
 
+def zslice_only(part):
+    return str(part.get("printer", "")).lower() in ZSLICE_ONLY
+
+
 def slicer_of(part):
-    return part.get("slicer") or "cura"
+    return "zslice" if zslice_only(part) else part.get("slicer") or "cura"
 
 
 def fdm_slicer(part):
     """The module that slices the FDM part, and the name of its slicer."""
+    if zslice_only(part):
+        return zslicer.BAMBU, zslicer.NAME
     if slicer_of(part) == "zslice":
         return zslicer, zslicer.NAME
     return curaslice, "CuraEngine 5.13.0"
@@ -565,7 +575,7 @@ def profile_of(part):
     if not re.fullmatch(r"[A-Za-z0-9._-]+", folder) or folder in (".", "..") or not re.fullmatch(r"[A-Za-z0-9._-]+", quality or "x"):
         fail(f"{part['name']}: a profile is <folder>/<profile>: {part['profile']}")
     path = inside(os.path.join("profiles", folder), "the folder of a profile")
-    stack = "resin.json" if process_of(part) == "resin" else "cura.json"
+    stack = "resin.json" if process_of(part) == "resin" else "zslice" if zslice_only(part) else "cura.json"
     if not quality or not os.path.exists(os.path.join(path, stack)):
         fail(f"{part['name']}: no profile {part['profile']} in profiles/ ({stack})")
     try:
@@ -780,7 +790,7 @@ def material_info(part):
     """The name and the color of the material of a part for the pages: "MatterHackers PLA Black"
     and "#1a1a1a" for a roll of the profile folder, or the material of printdeck.yml."""
     mat = str(part.get("material", ""))
-    if part.get("prebuilt") or not part.get("profile"):
+    if part.get("prebuilt") or not part.get("profile") or zslice_only(part):
         return mat, ""
     path, _ = profile_of(part)
     try:
@@ -797,7 +807,7 @@ def bed_and_margin(part):
         bed = tuple(float(x) for x in part["bed"])
     else:
         bed = PRINTERS.get(str(part["printer"]).lower(), ("fdm", (0.0, 0.0)))[1]
-    if part.get("prebuilt") or not part.get("profile"):
+    if part.get("prebuilt") or not part.get("profile") or zslice_only(part):
         return bed, 0.0
     if process_of(part) == "resin":
         resin = resin_profile(part)

@@ -93,12 +93,12 @@ runs:
       run: bash "$GITHUB_ACTION_PATH/curaengine.sh" "$HOME/.cache/printdeck-curaengine-5.13.0"
 
     # zslice, for the parts with "slicer: zslice" (zslicer.py gets it, and checks its SHA-256).
-    - name: Cache zslice 0.4.0-beta
+    - name: Cache zslice 0.5.0-beta
       if: steps.plates.outputs.fdm == 'true' || steps.parts.outputs.fdm == 'true'
       uses: actions/cache@v4
       with:
-        path: ~/.cache/printdeck-zslice-0.4.0-beta/zslice-0.4.0-beta.tgz
-        key: printdeck-zslice-0.4.0-beta
+        path: ~/.cache/printdeck-zslice-0.5.0-beta/zslice-0.5.0-beta.tgz
+        key: printdeck-zslice-0.5.0-beta
 
     - name: ${{ inputs.mode == 'slice' && format('Slice the plates of Printdeck build {0}', inputs.build) || 'Send the plan of the parts to Printdeck' }}
       shell: bash

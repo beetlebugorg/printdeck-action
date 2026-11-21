@@ -24,6 +24,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import types
 import zipfile
 from xml.sax.saxutils import escape, quoteattr
 
@@ -31,7 +32,7 @@ import curaslice
 import platepack
 
 # The npm package of zslice: the version, and the SHA-256 of its tarball.
-ZSLICE = ("0.4.0-beta", "09806dae4d3724d0032ddd7bde0de39609cf46a1aefb053649bd27d7ae8bb44c")
+ZSLICE = ("0.5.0-beta", "11e4f4bf5c40b7faa4a652204a24065361bf92ed383e2b76455dcc76e1132215")
 REGISTRY = "https://npm.pkg.github.com/"
 NAME = f"zslice {ZSLICE[0]}"
 
@@ -251,3 +252,49 @@ def slice_plate(profile_dir, quality, material, parts, out, name="plate", meta=(
     f["scale"] = (1.0, 1.0)
     f["line_width"] = float(es.get("line_width") or gs.get("line_width") or 0.4)
     return f
+
+
+SETTING = re.compile(r"(machine|filament|project)\.[a-z0-9_]+")
+
+
+def slice_bambu(profile_dir, quality, material, parts, out, name="plate", meta=()):
+    """Slices one part for a Bambu Lab printer, with the zslice profiles of the folder and no Cura
+    stack. The part is one file at its place in the file. A 3MF file gives each object its
+    filament. The settings of the part are zslice settings (project.wall_count)."""
+    if len(parts) != 1 or len(parts[0][1]) != 1 or parts[0][2] != 1:
+        raise SystemExit("a plate of a Bambu Lab printer is one part with one file, count 1 (alone: true)")
+    _, files, _, settings = parts[0]
+    args = command() + ["slice", files[0]]
+    for flag, p in profiles(profile_dir, quality, material):
+        args += [flag, p]
+    for k, v in sorted((settings or {}).items()):
+        if not SETTING.fullmatch(str(k)):
+            raise curaslice.ProfileError(f"the setting {k!r} of a Bambu Lab part is no zslice setting (project.wall_count)")
+        args += ["-s", f"{k}={value_text(v)}"]
+    tmp = tempfile.mkdtemp(prefix="zslice-")
+    raw, stats_path = os.path.join(tmp, "out.gcode"), os.path.join(tmp, "stats.json")
+    args += ["-o", raw, "--stats", stats_path]
+    env = {"PATH": os.environ.get("PATH", ""), "HOME": tmp}
+    p = subprocess.run(args, env=env, capture_output=True, text=True, timeout=int(os.environ.get("SLICE_TIMEOUT", 1800)))
+    if p.returncode != 0 or not os.path.exists(raw):
+        raise SystemExit("zslice failed:\n" + (p.stderr or p.stdout)[-3000:])
+    LAST_WARNINGS[:] = [l.strip() for l in p.stderr.splitlines() if l.strip()][:20]
+    with open(stats_path) as r:
+        stats = json.load(r)
+    profile = f"{os.path.basename(os.path.normpath(profile_dir))}/{quality}@{curaslice.profile_version(profile_dir)}"
+    lines = list(meta) + [f";Printdeck profile: {profile}", f";Printdeck slicer: {NAME}"]
+    with open(out, "w", encoding="utf-8") as w:
+        w.write("\n".join(header(stats, lines)) + "\n")
+        with open(raw, encoding="utf-8", errors="replace") as r:
+            shutil.copyfileobj(r, w)
+    shutil.rmtree(tmp, ignore_errors=True)
+    f = curaslice.facts(out)
+    f["grams"] = round(float(stats.get("filamentG", 0)), 1)
+    f["profile"] = profile
+    f["places"] = []
+    f["line_width"] = 0.4
+    return f
+
+
+# The slicer of a printer with no Cura stack, for printdeck_action.fdm_slicer.
+BAMBU = types.SimpleNamespace(slice_plate=slice_bambu, LAST_WARNINGS=LAST_WARNINGS)
