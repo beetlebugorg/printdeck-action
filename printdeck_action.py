@@ -1273,6 +1273,8 @@ def do_slice(config_path, job):
                 entry.update({"file": name, "seconds": int(facts.get("seconds", 0)), "grams": facts.get("grams", 0),
                               "layers": int(facts.get("layers", 0)), "layer_height": facts.get("layer_height", 0),
                               "profile": facts["profile"], "slicer": slicer})
+                if facts.get("settings"):
+                    entry["settings"] = facts["settings"]
                 log(f"Sliced in {took:.1f} s: {clock(entry['seconds'])}, {entry['grams']} g, {entry['layers']} layers of "
                     f"{entry['layer_height']} mm, profile {facts['profile']}")
         data = open(paths[entry["file"]], "rb").read()

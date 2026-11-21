@@ -251,6 +251,7 @@ def slice_plate(profile_dir, quality, material, parts, out, name="plate", meta=(
     f["centre"] = (cx, cy)
     f["scale"] = (1.0, 1.0)
     f["line_width"] = float(es.get("line_width") or gs.get("line_width") or 0.4)
+    f["settings"] = curaslice.plate_settings(gs, es)
     return f
 
 
